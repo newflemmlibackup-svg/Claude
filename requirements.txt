@@ -1,0 +1,14 @@
+pydicom>=2.4,<4
+numpy>=1.24
+
+# Optional, aber dringend empfohlen: Decoder-Plugins fuer komprimierte DICOM-
+# Transfersyntaxen (JPEG Baseline/Lossless, JPEG2000), wie sie manche DVT-
+# Geraete verwenden. Ohne diese Pakete koennen komprimierte Bilddaten nicht
+# dekomprimiert werden (das Programm meldet dies als Warnung, bricht aber
+# nicht ab).
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pylibjpeg-openjpeg>=2.1
+
+# Nur zum Bauen einer eigenstaendigen .exe (siehe build/README.md):
+pyinstaller>=6.0 ; sys_platform == "win32"
