@@ -1,0 +1,7 @@
+pydicom>=2.4,<4
+numpy>=1.24
+Pillow>=10.1
+reportlab>=4.0
+
+# Nur zum Bauen einer eigenstaendigen .exe/.app (siehe build/):
+pyinstaller>=6.0 ; sys_platform == "win32" or sys_platform == "darwin"
