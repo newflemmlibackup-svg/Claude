@@ -32,9 +32,13 @@ inklusive gueltiger DICOMDIR neu auf.
 
 ## Voraussetzungen
 
-- Windows-PC (da Sidexis dort laeuft) – das Tool selbst ist plattformunabhaengig.
-- Entweder die fertige `DVT-Sidexis-Importer.exe` (siehe `build/`) **oder**
-  Python 3.10+ mit den Paketen aus `requirements.txt`.
+- Sidexis selbst laeuft nur unter Windows – der eigentliche Import muss also
+  am Windows-Praxis-PC erfolgen. Die **Konvertierung** kann aber auch auf
+  einem Mac laufen (z. B. wenn dort der Fremd-Stick zuerst gesichtet wird);
+  den erzeugten Zielordner dann per Netzwerk/USB an den Sidexis-PC uebergeben.
+- Entweder die fertige App fuer die eigene Plattform (siehe `build/`,
+  `DVT-Sidexis-Importer.exe` fuer Windows bzw. `DVT-Sidexis-Importer.app` fuer
+  macOS) **oder** Python 3.10+ mit den Paketen aus `requirements.txt`.
 
 ## Bedienung
 
@@ -80,6 +84,41 @@ build\build_windows_exe.bat
 Die fertige Datei liegt danach unter `dist\DVT-Sidexis-Importer.exe` und kann
 ohne weitere Installation auf anderen Praxis-PCs verteilt werden.
 
+## Eigenstaendige macOS-App bauen
+
+Auf einem Mac mit installiertem Python 3 (empfohlen: der offizielle Installer
+von [python.org](https://www.python.org/downloads/macos/), der Tkinter schon
+mitbringt; bei Homebrew-Python zusaetzlich `brew install python-tk`):
+
+```bash
+chmod +x build/build_macos_app.sh   # nur beim allerersten Mal noetig
+./build/build_macos_app.sh
+```
+
+Die fertige App liegt danach unter `dist/DVT-Sidexis-Importer.app` und kann
+per Doppelklick gestartet werden.
+
+**Gatekeeper-Hinweis:** Da die App nicht mit einem kostenpflichtigen
+Apple-Entwicklerzertifikat signiert ist, meldet macOS beim allerersten Start
+auf einem anderen Mac (bzw. nach dem Kopieren/Herunterladen) vermutlich
+*"kann nicht geoeffnet werden, da der Entwickler nicht verifiziert werden
+kann"*. Einmalig genuegt: App mit **Rechtsklick > Oeffnen** starten und im
+Dialog erneut **Oeffnen** bestaetigen (alternativ: **Systemeinstellungen >
+Datenschutz & Sicherheit** > "Trotzdem oeffnen"). Das ist nur beim ersten
+Start noetig.
+
+Falls PyInstaller unter Homebrew-Python beim `--windowed`-Build mit einem
+Tkinter-/Framework-Fehler abbricht: sicherstellen, dass `python3` (siehe
+Ausgabe von `which python3`) tatsaechlich der python.org- oder
+Homebrew-Python mit Framework-Build ist, nicht eine minimalistische
+Alternativinstallation.
+
+Wichtig fuer beide Plattformen: PyInstaller baut nur fuer die Plattform (und
+bei macOS auch nur fuer die Prozessorarchitektur – Apple Silicon/M-Chips vs.
+Intel), auf der es ausgefuehrt wird. Wer die App fuer beide Mac-Architekturen
+verteilen will, muss den Build-Schritt auf je einem Intel- und einem
+Apple-Silicon-Mac ausfuehren (oder ein Universal2-Python verwenden).
+
 ## Entwicklung / Tests
 
 ```bash
@@ -100,8 +139,9 @@ dvt_importer/
   converter.py   Normalisiert die Daten und schreibt DICOMDIR + Bilddateien
   gui.py         Tkinter-Bedienoberflaeche
   __main__.py    Einstiegspunkt (`python -m dvt_importer`)
+run.py           Einstiegspunkt fuer PyInstaller-Builds (Windows/macOS)
 tests/           Automatisierte Tests (pytest)
-build/           Skript zum Bauen einer Windows-.exe
+build/           Skripte zum Bauen einer Windows-.exe bzw. macOS-.app
 ```
 
 ## Grenzen

@@ -10,5 +10,5 @@ pylibjpeg>=2.0
 pylibjpeg-libjpeg>=2.1
 pylibjpeg-openjpeg>=2.1
 
-# Nur zum Bauen einer eigenstaendigen .exe (siehe build/README.md):
-pyinstaller>=6.0 ; sys_platform == "win32"
+# Nur zum Bauen einer eigenstaendigen .exe/.app (siehe build/):
+pyinstaller>=6.0 ; sys_platform == "win32" or sys_platform == "darwin"

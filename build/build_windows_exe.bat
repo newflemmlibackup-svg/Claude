@@ -21,7 +21,7 @@ pyinstaller --noconfirm --onefile --windowed ^
     --name "DVT-Sidexis-Importer" ^
     --collect-all pydicom ^
     --collect-all pylibjpeg ^
-    dvt_importer\__main__.py
+    run.py
 
 echo.
 echo === Fertig ===
