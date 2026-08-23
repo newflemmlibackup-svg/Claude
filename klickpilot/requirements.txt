@@ -1,0 +1,11 @@
+numpy>=1.24
+Pillow>=10.1
+
+# macOS-Anbindung: Bildschirmfotos, Maus-/Tastatursteuerung (Quartz) sowie
+# das Mitlesen der Eingaben waehrend der Aufnahme (pynput).
+pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=9.0 ; sys_platform == "darwin"
+pynput>=1.7.6 ; sys_platform == "darwin"
+
+# Nur zum Bauen einer eigenstaendigen .app (siehe build/):
+pyinstaller>=6.0 ; sys_platform == "darwin"
