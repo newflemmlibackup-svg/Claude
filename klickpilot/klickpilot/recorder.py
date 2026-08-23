@@ -2,7 +2,11 @@
 
 Die eigentliche Auswertung steckt in :class:`RecordingSession` und kommt
 ohne macOS-Bibliotheken aus (dadurch testbar). :class:`Recorder` haengt
-lediglich die Systemereignisse (pynput) und den Bildschirmpuffer daran.
+die Systemereignisse an: die Maus ueber pynput, die Tastatur ueber einen
+eigenen Tap (:mod:`klickpilot.keytap`) - pynputs Tastatur-Listener fragt bei
+jedem Tastendruck das Tastaturlayout auf seinem eigenen Hintergrundthread
+ab, was neuere macOS-Versionen mit einem Absturz quittieren (siehe
+keytap.py fuer Details).
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import threading
 import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
+from .keytap import KeyEvent, NAMED_KEYS
 from .models import (
     CLICK, DRAG, KEY, SCROLL, TEXT, WAIT, Anchor, Step,
 )
@@ -210,21 +215,11 @@ class RecordingSession:
         return self.steps
 
 
-# Umsetzung der pynput-Tastennamen auf die Namen in :mod:`inputs`.
-SPECIAL_KEYS = {
-    "enter": "enter", "tab": "tab", "backspace": "backspace", "delete": "forward_delete",
-    "esc": "escape", "up": "up", "down": "down", "left": "left", "right": "right",
-    "home": "home", "end": "end", "page_up": "page_up", "page_down": "page_down",
-}
-for _number in range(1, 20):
-    SPECIAL_KEYS[f"f{_number}"] = f"f{_number}"
-
-MODIFIER_KEYS = {
-    "cmd": "cmd", "cmd_l": "cmd", "cmd_r": "cmd",
-    "shift": "shift", "shift_l": "shift", "shift_r": "shift",
-    "alt": "alt", "alt_l": "alt", "alt_r": "alt", "alt_gr": "alt",
-    "ctrl": "ctrl", "ctrl_l": "ctrl", "ctrl_r": "ctrl",
-}
+# Modifikatoren, die als "gehalten" mitgefuehrt werden. "fn" wird bewusst
+# ausgenommen (siehe TEXT_MODIFIERS oben): auf vielen Mac-Tastaturen loest
+# fn ohnehin keine eigenstaendigen, verlaesslich unterscheidbaren Ereignisse
+# aus.
+MODIFIER_NAMES = {"cmd", "shift", "alt", "ctrl"}
 
 
 class Recorder:
@@ -236,13 +231,15 @@ class Recorder:
         self.buffer = buffer
         self.on_stop = on_stop
         self._mouse_listener = None
-        self._keyboard_listener = None
+        self._key_tap = None
         self._lock = threading.Lock()
         self.running = False
         self.started_at = 0.0
 
     def start(self) -> None:
-        from pynput import keyboard, mouse
+        from pynput import mouse
+
+        from .keytap import create_key_tap
 
         if self.buffer is not None:
             self.buffer.start()
@@ -251,19 +248,18 @@ class Recorder:
         self._mouse_listener = mouse.Listener(
             on_click=self._on_click, on_scroll=self._on_scroll
         )
-        self._keyboard_listener = keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release
-        )
         self._mouse_listener.start()
-        self._keyboard_listener.start()
+        self._key_tap = create_key_tap()
+        self._key_tap.start(self._on_key_down, self._on_key_up)
 
     def stop(self) -> List[Step]:
         self.running = False
-        for listener in (self._mouse_listener, self._keyboard_listener):
-            if listener is not None:
-                listener.stop()
+        if self._mouse_listener is not None:
+            self._mouse_listener.stop()
         self._mouse_listener = None
-        self._keyboard_listener = None
+        if self._key_tap is not None:
+            self._key_tap.stop()
+        self._key_tap = None
         if self.buffer is not None:
             self.buffer.stop()
         steps = self.session.finish()
@@ -295,34 +291,30 @@ class Recorder:
             except Exception:
                 pass
 
-    def _on_press(self, key) -> None:
+    def _on_key_down(self, event: KeyEvent) -> None:
         if not self.running:
             return
         with self._lock:
-            self._handle_key(key)
+            self._handle_key(event)
 
-    def _on_release(self, key) -> None:
+    def _on_key_up(self, event: KeyEvent) -> None:
         if not self.running:
             return
-        name = getattr(key, "name", None)
-        if name in MODIFIER_KEYS:
-            self.session.modifiers.discard(MODIFIER_KEYS[name])
+        if event.name in MODIFIER_NAMES:
+            self.session.modifiers.discard(event.name)
 
-    def _handle_key(self, key) -> None:
+    def _handle_key(self, event: KeyEvent) -> None:
         moment = time.time()
-        name = getattr(key, "name", None)
-        character = getattr(key, "char", None)
+        name = event.name
+        character = event.char
 
-        if name in MODIFIER_KEYS:
-            self.session.modifiers.add(MODIFIER_KEYS[name])
+        if name in MODIFIER_NAMES:
+            self.session.modifiers.add(name)
             return
-        if name == "space":
-            character = " "
-            name = None
         held = {m for m in self.session.modifiers if m not in TEXT_MODIFIERS}
 
-        if name in SPECIAL_KEYS:
-            self.session.key_special(moment, SPECIAL_KEYS[name], sorted(self.session.modifiers))
+        if name in NAMED_KEYS:
+            self.session.key_special(moment, name, sorted(self.session.modifiers))
             return
         if character is None:
             return

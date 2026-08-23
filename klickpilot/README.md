@@ -192,7 +192,9 @@ klickpilot/
   anchors.py     Ausschnitte anlegen und auf dem Bildschirm wiederfinden
   screen.py      Bildschirmfotos (Quartz), Punkte/Pixel, Mitschnittpuffer
   inputs.py      Maus- und Tastaturereignisse erzeugen (Quartz)
+  keytap.py      Eigene Tastaturerfassung (Quartz-Tap statt pynput)
   recorder.py    Ereignisse zu einer sauberen Schrittfolge verdichten
+  hotkeys.py     Globale Tastenkuerzel (nutzt keytap.py)
   player.py      Wiedergabe samt Warten, Wiederholen, Abbrechen
   storage.py     Ablage je Button, Export/Import
   models.py      Datenmodell (Anker, Schritt, Button)

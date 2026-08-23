@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import pytest
 
+from klickpilot.keytap import KeyEvent
 from klickpilot.models import CLICK, DRAG, KEY, SCROLL, TEXT, Anchor
-from klickpilot.recorder import RecordingSession
+from klickpilot.recorder import Recorder, RecordingSession
 
 
 class StubFrame:
@@ -160,3 +161,75 @@ def test_reported_steps_reach_the_callback(config):
     recording.key_char(2.0, "z")
     recording.finish()
     assert [step.kind for step in seen] == [CLICK, TEXT]
+
+
+class TestRecorderKeyHandling:
+    """Prueft Recorder._handle_key/_on_key_up mit dem eigenen Tastatur-Tap.
+
+    Ersetzt seit dem Wegfall von pynputs Tastatur-Listener (Absturz unter
+    macOS 26, siehe keytap.py) den Uebersetzungsweg von rohen KeyEvents zu
+    aufgezeichneten Schritten.
+    """
+
+    def make_recorder(self, config):
+        recording = RecordingSession(
+            lambda frame, point: Anchor(template="a.png", size=(4, 4), hotspot=(2, 2), point=point),
+            lambda point, not_before=None: StubFrame(),
+            config,
+        )
+        return Recorder(recording), recording
+
+    def test_plain_letter_becomes_text(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(0, "a", "a", frozenset()))
+        steps = session.finish()
+        assert len(steps) == 1 and steps[0].kind == TEXT and steps[0].text == "a"
+
+    def test_space_merges_into_the_running_text(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(0, "h", "h", frozenset()))
+        recorder._on_key_down(KeyEvent(49, "space", " ", frozenset()))
+        recorder._on_key_down(KeyEvent(1, "i", "i", frozenset()))
+        steps = session.finish()
+        assert len(steps) == 1 and steps[0].text == "h i"
+
+    def test_modifier_plus_letter_is_a_shortcut(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(55, "cmd", None, frozenset()))
+        recorder._on_key_down(KeyEvent(8, "c", "c", frozenset({"cmd"})))
+        recorder._on_key_up(KeyEvent(8, "c", None, frozenset({"cmd"})))
+        recorder._on_key_up(KeyEvent(55, "cmd", None, frozenset()))
+        steps = session.finish()
+        assert len(steps) == 1 and steps[0].kind == KEY
+        assert steps[0].key == "c" and steps[0].modifiers == ["cmd"]
+
+    def test_named_key_is_not_treated_as_text(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(53, "escape", "\x1b", frozenset()))
+        steps = session.finish()
+        assert len(steps) == 1 and steps[0].kind == KEY and steps[0].key == "escape"
+
+    def test_arrow_key_is_recorded_by_name(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(123, "left", None, frozenset()))
+        steps = session.finish()
+        assert steps[0].key == "left"
+
+    def test_shift_alone_still_counts_as_text(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = True
+        recorder._on_key_down(KeyEvent(56, "shift", None, frozenset()))
+        recorder._on_key_down(KeyEvent(0, "a", "A", frozenset({"shift"})))
+        steps = session.finish()
+        assert steps[0].kind == TEXT and steps[0].text == "A"
+
+    def test_events_before_running_are_ignored(self, config):
+        recorder, session = self.make_recorder(config)
+        recorder.running = False
+        recorder._on_key_down(KeyEvent(0, "a", "a", frozenset()))
+        assert session.finish() == []
