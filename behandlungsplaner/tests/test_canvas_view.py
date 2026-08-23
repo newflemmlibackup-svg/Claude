@@ -56,6 +56,33 @@ def canvas_setup():
     root.destroy()
 
 
+def test_fit_is_deferred_until_the_widget_has_a_real_size():
+    """Regressionsschutz: wird direkt nach dem Erzeugen eingepasst, meldet Tk
+    noch 1x1 Pixel. Frueher entstand daraus ein Mikro-Zoom und das
+    Roentgenbild war praktisch unsichtbar - und wurde nie neu eingepasst."""
+    if not _tk_available():
+        pytest.skip("Tk kann kein Fenster oeffnen")
+    from behandlungsplaner.canvas_view import PlanCanvas
+    from behandlungsplaner.models import TreatmentPlan
+
+    root = tk.Tk()
+    try:
+        canvas = PlanCanvas(root, width=800, height=400)
+        # BEWUSST vor pack()/update(): das Widget hat noch keine Groesse.
+        canvas.load(TreatmentPlan(), Image.new("RGB", (2400, 1200), (90, 90, 90)))
+        canvas.zoom_fit()
+        assert canvas._needs_fit is True, "Einpassen muss aufgeschoben werden"
+
+        canvas.pack(fill="both", expand=True)
+        root.update()
+
+        assert canvas._needs_fit is False
+        # Das Bild muss den Grossteil der Canvasbreite ausfuellen.
+        assert canvas.image_w * canvas.zoom > canvas.winfo_width() * 0.5
+    finally:
+        root.destroy()
+
+
 def test_zoom_fit_centers_image(canvas_setup):
     root, canvas, plan = canvas_setup
     assert canvas.zoom > 0
@@ -188,6 +215,7 @@ def test_rotate_handle_sets_rotation(canvas_setup):
 def test_calibration_point_drag_updates_position(canvas_setup):
     root, canvas, plan = canvas_setup
     canvas.set_calibration_enabled(True)
+    canvas.set_calibration_edit_mode(True)
     tooth = 11
     fx, fy = plan.calibration_points[tooth]
     cx, cy = canvas._frac_to_canvas(fx, fy)
@@ -199,6 +227,25 @@ def test_calibration_point_drag_updates_position(canvas_setup):
 
     new_fx, new_fy = plan.calibration_points[tooth]
     assert (new_fx, new_fy) != (fx, fy)
+
+
+def test_calibration_points_are_not_grabbed_outside_edit_mode(canvas_setup):
+    """Ohne Kalibriermodus muss ein Symbol, das auf seinem Rasterpunkt liegt,
+    weiterhin greifbar sein - sonst liesse es sich nie wieder verschieben."""
+    root, canvas, plan = canvas_setup
+    canvas.set_calibration_enabled(True)
+    tooth = 11
+    fx, fy = plan.calibration_points[tooth]
+    cx, cy = canvas._frac_to_canvas(fx, fy)
+
+    canvas._place_new_item("krone", cx, cy)
+    item = plan.items[0]
+    canvas.select_item(item.id)
+
+    canvas._on_press(FakeEvent(cx, cy))
+    assert canvas._drag is not None
+    assert canvas._drag["mode"] == "move"
+    assert canvas._drag["item_id"] == item.id
 
 
 def test_bridge_endpoints_snap_and_compute_bridge_teeth(canvas_setup):

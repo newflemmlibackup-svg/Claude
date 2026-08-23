@@ -45,13 +45,55 @@ def test_palette_builds_all_entries_and_wires_drag(root):
     palette.pack()
     root.update()
 
-    assert len(palette.winfo_children()) >= len(ALL_KINDS)
+    # Fuer jede Befundart existiert genau eine Kachel.
+    assert set(palette._tiles.keys()) == set(ALL_KINDS)
 
-    palette._start_drag("krone", None)
+    canvas.begin_external_drag("krone")
     assert canvas._external_drag_kind == "krone"
     canvas.end_external_drag(200, 150)
     assert len(canvas.plan.items) == 1
     assert canvas.plan.items[0].kind == "krone"
+
+
+def test_palette_click_arms_kind_and_canvas_click_places_it(root):
+    """Klick-zum-Setzen als Alternative zum Ziehen: Kachel anklicken merkt die
+    Befundart vor, der naechste Klick ins Bild setzt sie."""
+    from PIL import Image
+
+    from behandlungsplaner.canvas_view import PlanCanvas
+    from behandlungsplaner.models import TreatmentPlan
+    from behandlungsplaner.palette import SymbolPalette
+
+    canvas = PlanCanvas(root, width=400, height=300)
+    canvas.pack()
+    canvas.load(TreatmentPlan(), Image.new("RGB", (800, 400), (90, 90, 90)))
+    root.update()
+
+    palette = SymbolPalette(root)
+    palette.set_target_canvas(canvas)
+    palette.on_armed_change = canvas.set_armed_kind
+    canvas.on_armed_consumed = palette.clear_armed
+    palette.pack()
+    root.update()
+
+    class FakeEvent:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    # Klick ohne Mausbewegung = vormerken (kein Ziehen).
+    palette._on_press("implantat", None)
+    palette._on_release("implantat", FakeEvent(0, 0))
+    assert palette.armed_kind == "implantat"
+    assert canvas._armed_kind == "implantat"
+
+    canvas._on_press(FakeEvent(200, 150))
+    root.update()
+
+    assert len(canvas.plan.items) == 1
+    assert canvas.plan.items[0].kind == "implantat"
+    # Nach dem Setzen ist die Vormerkung wieder aufgehoben.
+    assert canvas._armed_kind is None
+    assert palette.armed_kind is None
 
 
 def test_plan_list_view_refresh_edit_toggle_delete(root):
@@ -70,7 +112,11 @@ def test_plan_list_view_refresh_edit_toggle_delete(root):
     root.update()
 
     assert item.id in view.tree.get_children()
-    assert "1.800,00" in view.summary_label.cget("text")
+    assert "1.800,00" in view.total_label.cget("text")
+    # Die Zahnnummer steht in der ersten Spalte, im Klartext.
+    tooth_cell = view.tree.set(item.id, "tooth")
+    assert tooth_cell.startswith("16")
+    assert "Molar" in tooth_cell
 
     view.tree.selection_set(item.id)
     view._toggle_status()

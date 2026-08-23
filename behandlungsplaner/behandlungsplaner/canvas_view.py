@@ -11,20 +11,29 @@ from typing import Optional
 
 from PIL import Image, ImageTk
 
-from . import shapes
-from .fdi import ALL_FDI_TEETH, default_calibration_layout, fdi_arch, row_neighbors, teeth_between
+from . import shapes, snapping, theme
+from .fdi import (
+    ALL_FDI_TEETH,
+    LOWER_ROW_LEFT_TO_RIGHT,
+    UPPER_ROW_LEFT_TO_RIGHT,
+    default_calibration_layout,
+    teeth_between,
+)
 from .models import KIND_ANCHOR_TYPE, KIND_BRUECKE, KIND_LABELS, PlanItem
 
 HANDLE_SIZE = 9
 ROTATE_HANDLE_LOCAL_Y = -0.78
-SNAP_RADIUS_PX = 26
 MIN_SIZE_FRACTION = 0.006
 DEFAULT_NEW_WIDTH_FRACTION = 0.045
+# Ab dieser Kantenlaenge gilt das Canvas-Widget als tatsaechlich ausgelegt.
+MIN_USABLE_CANVAS_PX = 40
 
 CALIB_POINT_RADIUS = 6
 CALIB_COLOR = "#00c2b2"
-CALIB_COLOR_SELECTED = "#00887a"
-SELECTION_COLOR = "#2196f3"
+CALIB_COLOR_IDLE = "#5f9c96"
+CALIB_FILL_ACTIVE = "#d6f7f3"
+SELECTION_COLOR = "#2f7ef4"
+SNAP_COLOR = "#12b886"
 HANDLE_FILL = "#ffffff"
 
 
@@ -40,7 +49,7 @@ _RESAMPLE = _try_resample()
 
 class PlanCanvas(tk.Canvas):
     def __init__(self, parent, **kwargs):
-        kwargs.setdefault("bg", "#2b2b2b")
+        kwargs.setdefault("bg", theme.BG_CANVAS)
         kwargs.setdefault("highlightthickness", 0)
         super().__init__(parent, **kwargs)
 
@@ -60,12 +69,25 @@ class PlanCanvas(tk.Canvas):
 
         self._photo = None
         self._photo_zoom = None
+        self._needs_fit = False
 
         self._drag = None
         self._external_drag_kind = None
-        self._external_preview_id = None
+        # FDI-Nummer des Zahns, auf den gerade eingerastet wird - treibt die
+        # Hervorhebung waehrend Drag&Drop bzw. Verschieben.
+        self._snap_target_tooth = None
+        # Per Klick in der Palette vorgemerkte Befundart: der naechste Klick
+        # ins Bild setzt sie (Alternative zum Ziehen).
+        self._armed_kind = None
+        self.on_armed_consumed = None
+        # Solange aktiv, werden ausschliesslich die Rasterpunkte bearbeitet.
+        # Ohne diesen Modus waeren Rasterpunkte unter einem eingerasteten
+        # Symbol nicht mehr greifbar.
+        self.calibration_edit_mode = False
 
         self.bind("<Configure>", self._on_configure)
+        self.bind("<Motion>", self._on_hover_motion)
+        self.bind("<Leave>", self._on_leave)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_motion)
         self.bind("<ButtonRelease-1>", self._on_release)
@@ -82,6 +104,7 @@ class PlanCanvas(tk.Canvas):
         self.image_w, self.image_h = pil_image.size
         self.selected_item_id = None
         self._photo_zoom = None
+        self._needs_fit = True
         self.after_idle(self.zoom_fit)
 
     def _notify_change(self):
@@ -93,8 +116,21 @@ class PlanCanvas(tk.Canvas):
             self.on_selection_change(self.selected_item_id)
 
     # --------------------------------------------------------------- View
+    def _canvas_size(self):
+        return self.winfo_width(), self.winfo_height()
+
+    def _has_usable_size(self):
+        """True, sobald das Widget tatsaechlich ausgelegt ist. Vor dem ersten
+        Layout meldet Tk 1x1 - ein Einpassen darauf ergaebe einen
+        Mikro-Zoom, bei dem vom Roentgenbild nichts mehr zu sehen waere."""
+        cw, ch = self._canvas_size()
+        return cw >= MIN_USABLE_CANVAS_PX and ch >= MIN_USABLE_CANVAS_PX
+
     def _on_configure(self, _event):
-        if self.plan is not None and self._photo_zoom is None:
+        # Nach dem Laden so lange erneut einpassen, bis das Widget eine
+        # brauchbare Groesse hat (Layout laeuft asynchron, insbesondere in
+        # PanedWindows).
+        if self.plan is not None and self._needs_fit:
             self.zoom_fit()
         else:
             self._redraw()
@@ -102,10 +138,16 @@ class PlanCanvas(tk.Canvas):
     def zoom_fit(self):
         if not self.pil_image:
             return
-        cw, ch = max(self.winfo_width(), 10), max(self.winfo_height(), 10)
+        if not self._has_usable_size():
+            # Noch nicht ausgelegt: Einpassen aufheben, bis <Configure> mit
+            # echten Massen kommt.
+            self._needs_fit = True
+            return
+        cw, ch = self._canvas_size()
         self.zoom = min(cw / self.image_w, ch / self.image_h) * 0.96
         self.pan_x = (cw - self.image_w * self.zoom) / 2
         self.pan_y = (ch - self.image_h * self.zoom) / 2
+        self._needs_fit = False
         self._redraw()
 
     def zoom_100(self):
@@ -165,12 +207,30 @@ class PlanCanvas(tk.Canvas):
         self._draw_background()
         if self.plan.calibration_enabled:
             self._draw_calibration()
+        if self._snap_target_tooth is not None:
+            self._draw_snap_target(self._snap_target_tooth)
         for item in self.plan.items:
             self._draw_item(item)
         if self.selected_item_id:
             item = self.plan.get_item(self.selected_item_id)
             if item:
                 self._draw_handles(item)
+
+    def _draw_snap_target(self, tooth):
+        """Hebt den Zahn hervor, auf den gerade eingerastet wird - damit
+        sichtbar ist, welche Zahnnummer das Symbol bekommt."""
+        if not self.plan or tooth not in self.plan.calibration_points:
+            return
+        fx, fy = self.plan.calibration_points[tooth]
+        cx, cy = self._frac_to_canvas(fx, fy)
+        spacing_px = snapping.local_spacing_px(
+            self.plan.calibration_points, tooth, self.image_w, self.image_h)
+        r = max(14.0, spacing_px * 0.62 * self.zoom)
+        self.create_oval(cx - r, cy - r, cx + r, cy + r,
+                          outline=SNAP_COLOR, width=2.5, tags=("snaptarget",))
+        label_y = cy - r - 12
+        self.create_text(cx, label_y, text=f"Zahn {tooth}", fill=SNAP_COLOR,
+                          font=(theme.Fonts.family, 11, "bold"), tags=("snaptarget",))
 
     def _draw_background(self):
         if self._photo_zoom != round(self.zoom, 4):
@@ -212,20 +272,43 @@ class PlanCanvas(tk.Canvas):
             x0, y0, x1, y1 = shapes.bounding_box(item, self.image_w, self.image_h)
             bx, by = self.img_to_canvas(x1, y0)  # obere rechte Ecke der Bounding-Box
             r = 8
-            self.create_oval(bx - r, by - r, bx + r, by + r, fill="#2e7d32",
-                              outline="#ffffff", width=1, tags=tags)
+            self.create_oval(bx - r, by - r, bx + r, by + r, fill=theme.SUCCESS,
+                              outline="#ffffff", width=1.5, tags=tags)
             self.create_text(bx, by, text="✓", fill="#ffffff",
-                              font=("Helvetica", 9, "bold"), tags=tags)
+                              font=(theme.Fonts.family, 9, "bold"), tags=tags)
 
     def _draw_calibration(self):
+        # Zahnbogen als feine Verbindungslinie - macht auf einen Blick
+        # sichtbar, ob das Raster sauber auf der Zahnreihe liegt.
+        for row in (UPPER_ROW_LEFT_TO_RIGHT, LOWER_ROW_LEFT_TO_RIGHT):
+            path = []
+            for tooth in row:
+                if tooth in self.plan.calibration_points:
+                    path.extend(self._frac_to_canvas(*self.plan.calibration_points[tooth]))
+            if len(path) >= 4:
+                self.create_line(path,
+                                  fill=CALIB_COLOR if self.calibration_edit_mode
+                                       else CALIB_COLOR_IDLE,
+                                  width=1.0, dash=(2, 4), tags=("calib",))
+
+        # Im Bearbeitungsmodus sind die Punkte das aktive Bedienelement und
+        # entsprechend kraeftig. Sonst bleiben sie bewusst zurueckhaltend -
+        # sie liegen genau dort, wo auch die Symbole sitzen, und wuerden die
+        # eigentliche Planung sonst optisch zudecken.
+        editing = self.calibration_edit_mode
+        r = CALIB_POINT_RADIUS + 3 if editing else CALIB_POINT_RADIUS - 2
         for tooth, (fx, fy) in self.plan.calibration_points.items():
             cx, cy = self._frac_to_canvas(fx, fy)
-            color = CALIB_COLOR
-            r = CALIB_POINT_RADIUS
-            self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=2,
-                              fill="#ffffff", tags=("calib", f"calib:{tooth}"))
-            self.create_text(cx, cy - r - 9, text=str(tooth), fill=color,
-                              font=("Helvetica", 9, "bold"), tags=("calib",))
+            self.create_oval(cx - r, cy - r, cx + r, cy + r,
+                              outline=CALIB_COLOR if editing else CALIB_COLOR_IDLE,
+                              width=3 if editing else 1.5,
+                              fill=CALIB_FILL_ACTIVE if editing else "",
+                              tags=("calib", f"calib:{tooth}"))
+            self.create_text(cx, cy - r - 8, text=str(tooth),
+                              fill=CALIB_COLOR if editing else CALIB_COLOR_IDLE,
+                              font=(theme.Fonts.family, 9, "bold") if editing
+                                   else (theme.Fonts.family, 8),
+                              tags=("calib",))
 
     def _handle_positions(self, item: PlanItem) -> dict:
         """Bildpixel-Positionen aller Greifpunkte des Items."""
@@ -301,31 +384,86 @@ class PlanCanvas(tk.Canvas):
                 return item.id
         return None
 
-    def _nearest_calibration_point(self, fx, fy, max_px=SNAP_RADIUS_PX):
-        if not self.plan.calibration_enabled:
+    def _nearest_calibration_point(self, fx, fy, factor=snapping.ASSIGN_FACTOR):
+        """Naechster kalibrierter Zahn zu einer Bildposition (Anteilswerte)."""
+        if not self.plan or not self.plan.calibration_enabled:
             return None
-        best_tooth, best_dist = None, None
-        px, py = self._frac_to_canvas(fx, fy)
-        for tooth, (tfx, tfy) in self.plan.calibration_points.items():
-            tpx, tpy = self._frac_to_canvas(tfx, tfy)
-            dist = math.hypot(tpx - px, tpy - py)
-            if dist <= max_px and (best_dist is None or dist < best_dist):
-                best_tooth, best_dist = tooth, dist
-        return best_tooth
+        return snapping.nearest_tooth(
+            self.plan.calibration_points, fx, fy, self.image_w, self.image_h, factor=factor,
+        )
+
+    def _snap(self, fx, fy):
+        """(x, y, zahn): magnetische Positionseinrastung plus (grosszuegigere)
+        Zahnzuordnung. Ohne aktive Kalibrierung bleibt alles unveraendert."""
+        if not self.plan or not self.plan.calibration_enabled:
+            return fx, fy, None
+        return snapping.snap_position(
+            self.plan.calibration_points, fx, fy, self.image_w, self.image_h,
+        )
+
+    def _apply_tooth_to_item(self, item, tooth):
+        """Weist einem Symbol einen Zahn zu und passt - solange die Groesse
+        noch automatisch bestimmt wird - Breite/Hoehe an diesen Zahn an."""
+        if item.fdi_tooth == tooth:
+            return
+        item.fdi_tooth = tooth
+        if item.auto_sized:
+            item.width, item.height = snapping.fit_box_for_tooth(
+                item.kind, tooth, self.plan.calibration_points, self.image_w, self.image_h,
+                fallback_width_fraction=item.width,
+            )
+
+    # -------------------------------------------------- Klick-zum-Setzen
+    def set_armed_kind(self, kind):
+        """Merkt eine Befundart vor; der naechste Klick ins Bild setzt sie."""
+        self._armed_kind = kind
+        self.configure(cursor="crosshair" if kind else "")
+        if kind is None:
+            self.delete("dragpreview")
+            if self._snap_target_tooth is not None:
+                self._snap_target_tooth = None
+                self._redraw()
+
+    def _on_hover_motion(self, event):
+        """Vorschau auch ohne gedrueckte Maustaste, solange eine Befundart
+        vorgemerkt ist - so ist vor dem Klick sichtbar, was entstehen wird."""
+        if not self._armed_kind or self._drag or not self.plan:
+            return
+        self._external_drag_kind = self._armed_kind
+        try:
+            self.update_external_drag(event.x, event.y)
+        finally:
+            self._external_drag_kind = None
+
+    def _on_leave(self, _event):
+        if self._armed_kind:
+            self.delete("dragpreview")
 
     # ------------------------------------------------------ Maus: Auswahl
     def _on_press(self, event):
         if self._external_drag_kind:
             return  # wird ueber begin/update/end_external_drag gesteuert
 
+        if self._armed_kind:
+            kind = self._armed_kind
+            self.set_armed_kind(None)
+            if self.on_armed_consumed:
+                self.on_armed_consumed()
+            self._place_new_item(kind, event.x, event.y)
+            return
+
+        # Im Kalibriermodus zaehlen ausschliesslich die Rasterpunkte - so
+        # laesst sich das Raster auch dann noch korrigieren, wenn bereits
+        # Symbole darauf liegen.
+        if self.calibration_edit_mode:
+            calib_tooth = self._hit_test_calibration(event.x, event.y)
+            if calib_tooth is not None:
+                self._drag = {"mode": "calib", "tooth": calib_tooth}
+            return
+
         handle = self._hit_test_handle(event.x, event.y)
         if handle:
             self._start_handle_drag(handle, event)
-            return
-
-        calib_tooth = self._hit_test_calibration(event.x, event.y)
-        if calib_tooth is not None:
-            self._drag = {"mode": "calib", "tooth": calib_tooth}
             return
 
         item_id = self._hit_test_item(event.x, event.y)
@@ -396,10 +534,25 @@ class PlanCanvas(tk.Canvas):
         fx0, fy0 = self._drag["start_frac"]
         dx, dy = fx - fx0, fy - fy0
         ox, oy = self._drag["orig"]
-        item.x, item.y = ox + dx, oy + dy
-        if item.kind == KIND_BRUECKE and self._drag["orig_end"][0] is not None:
-            oex, oey = self._drag["orig_end"]
-            item.end_x, item.end_y = oex + dx, oey + dy
+        new_x, new_y = ox + dx, oy + dy
+
+        if item.kind == KIND_BRUECKE:
+            item.x, item.y = new_x, new_y
+            if self._drag["orig_end"][0] is not None:
+                oex, oey = self._drag["orig_end"]
+                item.end_x, item.end_y = oex + dx, oey + dy
+            item.touch()
+            return
+
+        # Zahngebundene Symbole folgen beim Verschieben der Kalibrierung: die
+        # Zahnnummer (und damit Kontur und ggf. Groesse) wird laufend
+        # aktualisiert, nicht nur einmalig beim Ablegen.
+        if KIND_ANCHOR_TYPE.get(item.kind) == "tooth":
+            new_x, new_y, tooth = self._snap(new_x, new_y)
+            if tooth is not None:
+                self._apply_tooth_to_item(item, tooth)
+            self._snap_target_tooth = tooth
+        item.x, item.y = new_x, new_y
         item.touch()
 
     def _do_resize(self, event):
@@ -437,6 +590,9 @@ class PlanCanvas(tk.Canvas):
         item.height = new_h / self.image_h
         item.x = new_cx / self.image_w
         item.y = new_cy / self.image_h
+        # Ab jetzt bestimmt die Nutzerin/der Nutzer die Groesse - ein spaeteres
+        # Verschieben auf einen anderen Zahn darf sie nicht mehr ueberschreiben.
+        item.auto_sized = False
         item.touch()
 
     def _do_rotate(self, event):
@@ -458,21 +614,26 @@ class PlanCanvas(tk.Canvas):
     def _do_bridge_endpoint_drag(self, event, mode):
         item = self.plan.get_item(self._drag["item_id"])
         fx, fy = self._canvas_to_frac(event.x, event.y)
-        snapped = self._nearest_calibration_point(fx, fy)
-        if snapped is not None:
-            fx, fy = self.plan.calibration_points[snapped]
+        fx, fy, snapped = self._snap(fx, fy)
+
         if mode == "bridge_start":
             item.x, item.y = fx, fy
-            start_tooth = snapped
-            end_tooth = self._nearest_calibration_point(item.end_x or 0, item.end_y or 0, max_px=1e9) \
-                if self.plan.calibration_enabled else None
         else:
             item.end_x, item.end_y = fx, fy
-            end_tooth = snapped
-            start_tooth = self._nearest_calibration_point(item.x, item.y, max_px=1e9) \
-                if self.plan.calibration_enabled else None
-        if self.plan.calibration_enabled and start_tooth is not None and end_tooth is not None:
-            item.bridge_teeth = teeth_between(start_tooth, end_tooth)
+        self._snap_target_tooth = snapped
+
+        # Pfeiler/Zwischenglieder aus beiden Endpunkten ableiten. Fuer den
+        # jeweils NICHT gezogenen Endpunkt wird ohne Abstandsgrenze gesucht,
+        # damit die Spanne auch dann bestimmbar bleibt, wenn dieser Endpunkt
+        # etwas neben seinem Zahn liegt.
+        if self.plan.calibration_enabled:
+            unlimited = float("inf")
+            start_tooth = snapped if mode == "bridge_start" else \
+                self._nearest_calibration_point(item.x, item.y, factor=unlimited)
+            end_tooth = snapped if mode == "bridge_end" else \
+                self._nearest_calibration_point(item.end_x or 0.0, item.end_y or 0.0, factor=unlimited)
+            if start_tooth is not None and end_tooth is not None:
+                item.bridge_teeth = teeth_between(start_tooth, end_tooth)
         item.touch()
 
     def _do_bridge_thickness_drag(self, event):
@@ -493,77 +654,107 @@ class PlanCanvas(tk.Canvas):
         if self._drag and self._drag["mode"] != "pan":
             self._notify_change()
         self._drag = None
+        if self._snap_target_tooth is not None:
+            self._snap_target_tooth = None
+            self._redraw()
 
     # --------------------------------------------------- Palette-Drag-API
     def begin_external_drag(self, kind: str):
         self._external_drag_kind = kind
 
     def update_external_drag(self, canvas_x: int, canvas_y: int):
-        if not self._external_drag_kind or not self.plan:
+        """Zeichnet die Vorschau des Symbols an der Mausposition - in genau der
+        Kontur und Groesse, die beim Loslassen entstehen wuerde."""
+        kind = self._external_drag_kind
+        if not kind or not self.plan:
             return
-        self.delete("dragpreview")
-        r = 18
+
         inside = 0 <= canvas_x <= self.winfo_width() and 0 <= canvas_y <= self.winfo_height()
-        color = SELECTION_COLOR if inside else "#888888"
-        self.create_oval(canvas_x - r, canvas_y - r, canvas_x + r, canvas_y + r,
-                          outline=color, width=2, dash=(3, 2), tags=("dragpreview",))
-        self.create_text(canvas_x, canvas_y + r + 10, text=KIND_LABELS[self._external_drag_kind],
-                          fill=color, tags=("dragpreview",))
+        width, height, tooth = self.preview_box_for(kind, canvas_x, canvas_y)
+
+        if tooth != self._snap_target_tooth:
+            self._snap_target_tooth = tooth if inside else None
+            self._redraw()
+        self.delete("dragpreview")
+
+        if not inside:
+            return
+
+        fx, fy = self._canvas_to_frac(canvas_x, canvas_y)
+        if KIND_ANCHOR_TYPE.get(kind) == "tooth":
+            fx, fy, _tooth = self._snap(fx, fy)
+
+        ghost = PlanItem(kind=kind, x=fx, y=fy, width=width, height=height, fdi_tooth=tooth)
+        if kind == KIND_BRUECKE:
+            ghost.end_x, ghost.end_y = min(fx + 0.08, 1.0), fy
+            ghost.height = 0.018
+
+        for op in shapes.build_draw_ops(ghost, self.image_w, self.image_h):
+            pts = self._canvas_points(op.points)
+            if op.kind == "polygon":
+                self.create_polygon(pts, fill="", outline=op.outline or SELECTION_COLOR,
+                                     width=2.0, dash=(4, 3), tags=("dragpreview",))
+            elif op.kind == "line":
+                self.create_line(pts, fill=op.outline or SELECTION_COLOR, width=2.0,
+                                  dash=(4, 3), tags=("dragpreview",))
 
     def end_external_drag(self, canvas_x: Optional[int], canvas_y: Optional[int]):
         kind = self._external_drag_kind
         self._external_drag_kind = None
         self.delete("dragpreview")
+        self._snap_target_tooth = None
+        self._redraw()
         if kind is None or canvas_x is None or not self.plan:
             return
         if not (0 <= canvas_x <= self.winfo_width() and 0 <= canvas_y <= self.winfo_height()):
             return
         self._place_new_item(kind, canvas_x, canvas_y)
 
-    def _default_size_for(self, kind, width_fraction=None):
-        w = width_fraction if width_fraction is not None else DEFAULT_NEW_WIDTH_FRACTION
-        aspect = shapes.DEFAULT_ASPECT.get(kind, 0.8)
-        h = w / aspect
-        return w, h
+    def preview_box_for(self, kind, canvas_x, canvas_y):
+        """(breite, hoehe, zahn_oder_None) fuer die Drag-Vorschau an einer
+        Canvasposition - identisch zu dem, was `_place_new_item` erzeugen
+        wuerde. So zeigt der Ghost exakt das spaetere Ergebnis."""
+        fx, fy = self._canvas_to_frac(canvas_x, canvas_y)
+        tooth = None
+        if KIND_ANCHOR_TYPE.get(kind) == "tooth":
+            _sx, _sy, tooth = self._snap(fx, fy)
+        width, height = snapping.fit_box_for_tooth(
+            kind, tooth, self.plan.calibration_points if self.plan else {},
+            self.image_w, self.image_h,
+            fallback_width_fraction=DEFAULT_NEW_WIDTH_FRACTION,
+        )
+        return width, height, tooth
 
     def _place_new_item(self, kind, canvas_x, canvas_y):
         fx, fy = self._canvas_to_frac(canvas_x, canvas_y)
-        fdi_tooth = None
-        width, height = self._default_size_for(kind)
 
         if kind == KIND_BRUECKE:
-            end_x = min(fx + 0.08, 1.0)
+            width, _height = snapping.fit_box_for_tooth(
+                kind, None, {}, self.image_w, self.image_h,
+                fallback_width_fraction=DEFAULT_NEW_WIDTH_FRACTION,
+            )
             item = PlanItem(kind=kind, x=fx, y=fy, width=width, height=0.018,
-                            end_x=end_x, end_y=fy,
+                            end_x=min(fx + 0.08, 1.0), end_y=fy,
                             cost=self.plan.default_cost_for(kind))
             self.plan.add_item(item)
             self.select_item(item.id)
             self._notify_change()
             return
 
-        anchor_type = KIND_ANCHOR_TYPE.get(kind, "region")
-        if anchor_type == "tooth" and self.plan.calibration_enabled:
-            nearest = self._nearest_calibration_point(fx, fy)
-            if nearest is not None:
-                fdi_tooth = nearest
-                fx, fy = self.plan.calibration_points[nearest]
-                left, right = row_neighbors(nearest)
-                spacing_candidates = []
-                for neigh in (left, right):
-                    if neigh is not None and neigh in self.plan.calibration_points:
-                        nfx, nfy = self.plan.calibration_points[neigh]
-                        spacing_candidates.append(math.hypot(nfx - fx, nfy - fy))
-                if spacing_candidates:
-                    width = min(spacing_candidates) * 0.82
-                    height = width / shapes.DEFAULT_ASPECT.get(kind, 0.8)
-                rotation = 180.0 if fdi_arch(nearest) == "oben" else 0.0
-            else:
-                rotation = 0.0
-        else:
-            rotation = 0.0
+        fdi_tooth = None
+        if KIND_ANCHOR_TYPE.get(kind, "region") == "tooth":
+            fx, fy, fdi_tooth = self._snap(fx, fy)
 
+        width, height = snapping.fit_box_for_tooth(
+            kind, fdi_tooth, self.plan.calibration_points, self.image_w, self.image_h,
+            fallback_width_fraction=DEFAULT_NEW_WIDTH_FRACTION,
+        )
+
+        # Die Ausrichtung zum Gegenkiefer steckt in der Symbolgeometrie
+        # (shapes.arch_flip). `rotation` bleibt damit ausschliesslich fuer
+        # bewusste Nutzeranpassungen an gekippten Zaehnen reserviert.
         item = PlanItem(
-            kind=kind, x=fx, y=fy, width=width, height=height, rotation=rotation,
+            kind=kind, x=fx, y=fy, width=width, height=height,
             fdi_tooth=fdi_tooth, cost=self.plan.default_cost_for(kind),
         )
         self.plan.add_item(item)
@@ -580,6 +771,16 @@ class PlanCanvas(tk.Canvas):
         self.plan.touch()
         self._redraw()
         self._notify_change()
+
+    def set_calibration_edit_mode(self, enabled: bool):
+        """Kalibriermodus: Rasterpunkte verschieben statt Symbole bearbeiten."""
+        self.calibration_edit_mode = bool(enabled)
+        if enabled:
+            self.select_item(None)
+            self.configure(cursor="fleur")
+        else:
+            self.configure(cursor="")
+        self._redraw()
 
     def reset_calibration_layout(self):
         if not self.plan:

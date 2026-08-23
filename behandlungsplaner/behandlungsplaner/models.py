@@ -43,7 +43,7 @@ KIND_LABELS = {
     KIND_EXTRAKTION: "Extraktion",
     KIND_WURZELBEHANDLUNG: "Wurzelbehandlung",
     KIND_FEHLENDER_ZAHN: "Fehlender Zahn",
-    KIND_BRUECKE: "Bruecke",
+    KIND_BRUECKE: "Brücke",
 }
 
 # "tooth"   = an genau einem Zahn verankert
@@ -105,6 +105,10 @@ class PlanItem:
     end_x: Optional[float] = None
     end_y: Optional[float] = None
     bridge_teeth: Optional[list] = None
+    # True, solange die Groesse automatisch aus der Zahnkalibrierung abgeleitet
+    # wurde. Sobald die Nutzerin/der Nutzer selbst skaliert hat, bleibt die
+    # Groesse beim Verschieben auf einen anderen Zahn unangetastet.
+    auto_sized: bool = True
     status: str = STATUS_GEPLANT
     planned_date: str = field(default_factory=_today_iso)
     done_date: Optional[str] = None
@@ -157,6 +161,7 @@ class PlanItem:
             "end_x": self.end_x,
             "end_y": self.end_y,
             "bridge_teeth": list(self.bridge_teeth) if self.bridge_teeth else None,
+            "auto_sized": self.auto_sized,
             "status": self.status,
             "planned_date": self.planned_date,
             "done_date": self.done_date,

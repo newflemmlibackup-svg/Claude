@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image
 
 from . import config as config_module
-from . import pdf_export, storage
+from . import pdf_export, storage, theme
 from .canvas_view import PlanCanvas
 from .models import ALL_KINDS, KIND_LABELS, TreatmentPlan
 from .palette import SymbolPalette
@@ -125,7 +125,8 @@ class BehandlungsplanerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Behandlungsplaner")
-        self.root.geometry("1400x900")
+        self.root.geometry("1500x950")
+        theme.apply_theme(self.root)
 
         self.config = config_module.load_config()
         Path(self.config["data_root"]).mkdir(parents=True, exist_ok=True)
@@ -137,7 +138,7 @@ class BehandlungsplanerApp:
         self.undo_stack = UndoStack()
         self._loading = False
 
-        self.container = tk.Frame(root)
+        self.container = tk.Frame(root, bg=theme.BG_APP)
         self.container.pack(fill="both", expand=True)
 
         self.start_screen = StartScreen(self.container, self.config["data_root"])
@@ -154,72 +155,107 @@ class BehandlungsplanerApp:
         self.root.after(AUTOSAVE_INTERVAL_MS, self._autosave_tick)
 
     # --------------------------------------------------------------- UI
+    def _labelled_entry(self, parent, label, variable, width):
+        """Beschriftetes Eingabefeld im Kopfbereich (Label ueber dem Feld)."""
+        wrap = tk.Frame(parent, bg=theme.BG_SURFACE)
+        wrap.pack(side="left", padx=(0, theme.PAD_MD))
+        ttk.Label(wrap, text=label, style="FieldLabel.TLabel").pack(anchor="w")
+        entry = ttk.Entry(wrap, textvariable=variable, width=width, font=theme.Fonts.body)
+        entry.pack(anchor="w")
+        entry.bind("<FocusOut>", self._on_metadata_edited)
+        return entry
+
     def _build_editor_frame(self):
-        self.editor_frame = tk.Frame(self.container)
+        self.editor_frame = tk.Frame(self.container, bg=theme.BG_APP)
 
-        header = ttk.Frame(self.editor_frame)
-        header.pack(fill="x", padx=8, pady=6)
-        ttk.Button(header, text="< Planuebersicht", command=self._back_to_start).pack(side="left")
+        header = theme.card(self.editor_frame)
+        header.pack(fill="x", padx=theme.PAD_MD, pady=(theme.PAD_MD, theme.PAD_SM))
 
-        ttk.Label(header, text="Patient/-in:").pack(side="left", padx=(16, 2))
+        header_inner = tk.Frame(header, bg=theme.BG_SURFACE)
+        header_inner.pack(fill="x", padx=theme.PAD_MD, pady=theme.PAD_MD)
+
+        back_wrap = tk.Frame(header_inner, bg=theme.BG_SURFACE)
+        back_wrap.pack(side="left", padx=(0, theme.PAD_LG))
+        ttk.Label(back_wrap, text=" ", style="FieldLabel.TLabel").pack(anchor="w")
+        ttk.Button(back_wrap, text="‹  Übersicht", style="Ghost.TButton",
+                   command=self._back_to_start).pack(anchor="w")
+
         self.patient_name_var = tk.StringVar()
-        e1 = ttk.Entry(header, textvariable=self.patient_name_var, width=22)
-        e1.pack(side="left")
-        e1.bind("<FocusOut>", self._on_metadata_edited)
-
-        ttk.Label(header, text="Geb.:").pack(side="left", padx=(10, 2))
         self.birthdate_var = tk.StringVar()
-        e2 = ttk.Entry(header, textvariable=self.birthdate_var, width=12)
-        e2.pack(side="left")
-        e2.bind("<FocusOut>", self._on_metadata_edited)
-
-        ttk.Label(header, text="Behandler/-in:").pack(side="left", padx=(10, 2))
         self.practitioner_var = tk.StringVar()
-        e3 = ttk.Entry(header, textvariable=self.practitioner_var, width=16)
-        e3.pack(side="left")
-        e3.bind("<FocusOut>", self._on_metadata_edited)
-
-        ttk.Label(header, text="Datum:").pack(side="left", padx=(10, 2))
         self.plan_date_var = tk.StringVar()
-        e4 = ttk.Entry(header, textvariable=self.plan_date_var, width=12)
-        e4.pack(side="left")
-        e4.bind("<FocusOut>", self._on_metadata_edited)
 
+        self._labelled_entry(header_inner, "PATIENT/-IN", self.patient_name_var, 24)
+        self._labelled_entry(header_inner, "GEBURTSDATUM", self.birthdate_var, 13)
+        self._labelled_entry(header_inner, "BEHANDLER/-IN", self.practitioner_var, 18)
+        self._labelled_entry(header_inner, "DATUM", self.plan_date_var, 13)
+
+        calib_wrap = tk.Frame(header_inner, bg=theme.BG_SURFACE)
+        calib_wrap.pack(side="left")
+        ttk.Label(calib_wrap, text="ZAHNSCHEMA", style="FieldLabel.TLabel").pack(anchor="w")
+        calib_row = tk.Frame(calib_wrap, bg=theme.BG_SURFACE)
+        calib_row.pack(anchor="w")
         self.calib_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(header, text="FDI-Kalibrierraster", variable=self.calib_var,
-                         command=self._on_calibration_toggle).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(calib_row, text="FDI-Raster", variable=self.calib_var,
+                         command=self._on_calibration_toggle).pack(side="left")
+        self.calib_edit_var = tk.BooleanVar(value=False)
+        self.calib_edit_check = ttk.Checkbutton(
+            calib_row, text="anpassen", variable=self.calib_edit_var,
+            command=self._on_calibration_edit_toggle, state="disabled")
+        self.calib_edit_check.pack(side="left", padx=(theme.PAD_SM, 0))
 
-        self.status_label = ttk.Label(header, text="", foreground="#888")
+        self.status_label = ttk.Label(header_inner, text="", style="SurfaceMuted.TLabel")
         self.status_label.pack(side="right")
 
-        body = tk.PanedWindow(self.editor_frame, orient="vertical", sashwidth=4)
+        body = tk.PanedWindow(self.editor_frame, orient="vertical", sashwidth=6,
+                               bg=theme.BG_APP, bd=0, sashrelief="flat")
         body.pack(fill="both", expand=True)
 
-        top = tk.PanedWindow(body, orient="horizontal", sashwidth=4)
-        self.palette = SymbolPalette(top, width=170)
-        top.add(self.palette, stretch="never")
+        top = tk.PanedWindow(body, orient="horizontal", sashwidth=6,
+                              bg=theme.BG_APP, bd=0, sashrelief="flat")
+        self.palette = SymbolPalette(top, width=218)
+        self.palette.on_armed_change = self._on_palette_armed_change
+        top.add(self.palette, stretch="never", minsize=210)
 
-        canvas_frame = tk.Frame(top)
-        zoom_bar = ttk.Frame(canvas_frame)
-        zoom_bar.pack(fill="x")
-        ttk.Button(zoom_bar, text="Einpassen", command=lambda: self.canvas.zoom_fit()).pack(side="left", padx=2, pady=2)
-        ttk.Button(zoom_bar, text="100%", command=lambda: self.canvas.zoom_100()).pack(side="left", padx=2)
-        self.canvas = PlanCanvas(canvas_frame)
-        self.canvas.pack(fill="both", expand=True)
+        canvas_card = theme.card(top)
+        zoom_bar = tk.Frame(canvas_card, bg=theme.BG_SURFACE)
+        zoom_bar.pack(fill="x", padx=theme.PAD_SM, pady=theme.PAD_SM)
+        ttk.Button(zoom_bar, text="Einpassen", style="Ghost.TButton",
+                   command=lambda: self.canvas.zoom_fit()).pack(side="left")
+        ttk.Button(zoom_bar, text="100 %", style="Ghost.TButton",
+                   command=lambda: self.canvas.zoom_100()).pack(side="left", padx=theme.PAD_XS)
+        self.hint_label = ttk.Label(zoom_bar, text="", style="SurfaceMuted.TLabel")
+        self.hint_label.pack(side="right")
+
+        self.canvas = PlanCanvas(canvas_card)
+        self.canvas.pack(fill="both", expand=True, padx=1, pady=(0, 1))
         self.canvas.on_change = self._on_plan_changed
         self.canvas.on_selection_change = self._on_canvas_selection_changed
+        self.canvas.on_armed_consumed = self.palette.clear_armed
         self.canvas.bind("<Button-1>", lambda e: self.canvas.focus_set(), add="+")
         self.canvas.bind("<Delete>", lambda e: self.canvas.delete_selected())
         self.canvas.bind("<BackSpace>", lambda e: self.canvas.delete_selected())
-        top.add(canvas_frame, stretch="always")
+        self.canvas.bind("<Escape>", lambda e: self._cancel_armed())
+        top.add(canvas_card, stretch="always")
         body.add(top, stretch="always")
 
         self.palette.set_target_canvas(self.canvas)
 
-        self.list_view = PlanListView(body, height=180)
+        self.list_view = PlanListView(body, height=230)
         self.list_view.on_change = self._on_plan_changed
         self.list_view.on_row_selected = self._on_list_row_selected
-        body.add(self.list_view, stretch="never")
+        body.add(self.list_view, stretch="never", minsize=200)
+
+    def _on_palette_armed_change(self, kind):
+        self.canvas.set_armed_kind(kind)
+        if kind:
+            self.hint_label.config(
+                text=f"{KIND_LABELS[kind]}: Stelle im Bild anklicken  ·  Esc bricht ab")
+        else:
+            self.hint_label.config(text="")
+
+    def _cancel_armed(self):
+        self.palette.clear_armed()
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
@@ -323,6 +359,9 @@ class BehandlungsplanerApp:
         self.practitioner_var.set(plan.practitioner)
         self.plan_date_var.set(plan.plan_date)
         self.calib_var.set(plan.calibration_enabled)
+        self.calib_edit_var.set(False)
+        self.canvas.set_calibration_edit_mode(False)
+        self.calib_edit_check.config(state="normal" if plan.calibration_enabled else "disabled")
 
         self.canvas.load(plan, image)
         self.list_view.refresh(plan)
@@ -402,7 +441,24 @@ class BehandlungsplanerApp:
     def _on_calibration_toggle(self):
         if not self.plan:
             return
-        self.canvas.set_calibration_enabled(self.calib_var.get())
+        enabled = self.calib_var.get()
+        self.canvas.set_calibration_enabled(enabled)
+        self.calib_edit_check.config(state="normal" if enabled else "disabled")
+        if not enabled and self.calib_edit_var.get():
+            self.calib_edit_var.set(False)
+            self._on_calibration_edit_toggle()
+
+    def _on_calibration_edit_toggle(self):
+        if not self.plan:
+            return
+        editing = self.calib_edit_var.get()
+        self.canvas.set_calibration_edit_mode(editing)
+        if editing:
+            self.palette.clear_armed()
+            self.hint_label.config(
+                text="Kalibrieren: Zahlenpunkte auf die Zähne ziehen  ·  danach „anpassen“ beenden")
+        else:
+            self.hint_label.config(text="")
 
     # ---------------------------------------------------------- Undo/Redo
     def _load_snapshot(self, state_json):

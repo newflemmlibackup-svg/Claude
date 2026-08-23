@@ -1,4 +1,4 @@
-"""Reine Geometrie-/Stil-Erzeugung fuer die Befund-Symbole.
+"""Geometrie- und Stilerzeugung fuer die Befund-Symbole.
 
 Liefert fuer jede Planungsposition (PlanItem) eine Liste von `DrawOp`
 ("Zeichenoperationen") in absoluten Bildpixel-Koordinaten. Diese Liste wird
@@ -6,27 +6,36 @@ sowohl vom Tkinter-Canvas (zzgl. Zoom/Pan-Transformation) als auch vom
 PIL-basierten Export (render.py) verwendet - so sehen Bildschirmdarstellung
 und PDF/PNG-Export garantiert gleich aus.
 
-Alle "normalen" (zahngebundenen bzw. frei platzierbaren) Symbole werden in
-einem lokalen Einheitsquadrat [-0.5, 0.5] x [-0.5, 0.5] definiert und dann per
-`_place()` skaliert (item.width/height), rotiert (item.rotation) und an
-item.x/item.y verschoben. Die Bruecke ist ein Sonderfall (spannt zwei Punkte).
+Die Symbole werden im lokalen Einheitsquadrat [-0.5, 0.5] x [-0.5, 0.5]
+definiert und dann per `_place()` skaliert (item.width/height), rotiert
+(item.rotation) und an item.x/item.y verschoben. Die Bruecke ist ein
+Sonderfall (spannt zwei Punkte).
+
+Zahngebundene Symbole (Krone, Teilkrone, Extraktion, Wurzelbehandlung,
+fehlender Zahn) richten ihre Kontur nach der FDI-Zahnklasse: ein Molar
+bekommt eine breite Kaufflaeche mit vier Hoeckern, ein Schneidezahn eine
+schmale flache Schneide. Zusaetzlich wird die Kaufflaeche automatisch zum
+Gegenkiefer hin ausgerichtet (Oberkiefer nach unten, Unterkiefer nach oben),
+ohne dafuer `item.rotation` zu verbrauchen.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
+from . import tooth_anatomy as anat
+from .fdi import fdi_arch
 from .models import (
     KIND_BRUECKE,
     KIND_EXTRAKTION,
     KIND_FEHLENDER_ZAHN,
     KIND_IMPLANTAT,
     KIND_KRONE,
+    KIND_LABELS,
     KIND_NICO_FDOK,
     KIND_TEILKRONE,
     KIND_WURZELBEHANDLUNG,
-    KIND_LABELS,
 )
 
 
@@ -55,18 +64,40 @@ COLORS = {
     KIND_BRUECKE: {"fill": "#f3d67c", "outline": "#a9791a", "text": "#6b4c10"},
 }
 
-# Sinnvolle Default-Seitenverhaeltnisse (Breite:Hoehe), falls keine
-# Kalibrierung vorliegt und die Groesse frei gewaehlt wird.
+# Befundarten, deren Kontur sich nach der Zahnklasse richtet.
+TOOTH_SHAPED_KINDS = {
+    KIND_KRONE,
+    KIND_TEILKRONE,
+    KIND_EXTRAKTION,
+    KIND_WURZELBEHANDLUNG,
+    KIND_FEHLENDER_ZAHN,
+}
+
+# Symbole, die den ganzen Zahn (Krone + Wurzel) darstellen - im Gegensatz zu
+# reinen Kronenversorgungen.
+FULL_TOOTH_KINDS = {KIND_EXTRAKTION, KIND_WURZELBEHANDLUNG, KIND_FEHLENDER_ZAHN}
+
+# Fallback-Seitenverhaeltnisse (Breite:Hoehe) fuer nicht zahngebundene Symbole.
 DEFAULT_ASPECT = {
     KIND_IMPLANTAT: 0.5,
-    KIND_KRONE: 0.8,
-    KIND_TEILKRONE: 0.8,
+    KIND_KRONE: 1.15,
+    KIND_TEILKRONE: 1.15,
     KIND_NICO_FDOK: 1.3,
-    KIND_EXTRAKTION: 0.9,
-    KIND_WURZELBEHANDLUNG: 0.45,
-    KIND_FEHLENDER_ZAHN: 0.8,
+    KIND_EXTRAKTION: 0.85,
+    KIND_WURZELBEHANDLUNG: 0.85,
+    KIND_FEHLENDER_ZAHN: 0.85,
     KIND_BRUECKE: 1.0,
 }
+
+
+def aspect_for(kind: str, fdi_tooth=None) -> float:
+    """Sinnvolles Breite:Hoehe-Verhaeltnis, abhaengig von Befundart und - bei
+    zahngebundenen Symbolen - von der Zahnklasse."""
+    if kind in TOOTH_SHAPED_KINDS:
+        tooth_class = anat.tooth_class_for(fdi_tooth)
+        table = anat.FULL_TOOTH_ASPECT if kind in FULL_TOOTH_KINDS else anat.CROWN_ASPECT
+        return table[tooth_class]
+    return DEFAULT_ASPECT.get(kind, 0.8)
 
 
 def legend_entries():
@@ -74,15 +105,28 @@ def legend_entries():
     return [(k, KIND_LABELS[k], COLORS[k]["outline"]) for k in COLORS]
 
 
+def arch_flip(fdi_tooth) -> float:
+    """+1 oder -1: spiegelt die lokale y-Achse, damit die Kaufflaeche bei
+    Oberkieferzaehnen nach unten und bei Unterkieferzaehnen nach oben zeigt.
+
+    Ohne Zahnzuordnung wird die Unterkiefer-Ausrichtung (Kauflaeche oben)
+    als neutraler Default verwendet - so wie die Symbole auch in der Palette
+    dargestellt sind.
+    """
+    if fdi_tooth is None:
+        return 1.0
+    return -1.0 if fdi_arch(fdi_tooth) == "oben" else 1.0
+
+
 def _rotate(dx: float, dy: float, theta: float) -> tuple:
     c, s = math.cos(theta), math.sin(theta)
     return dx * c - dy * s, dx * s + dy * c
 
 
-def _place(local_points, cx, cy, w, h, theta) -> list:
+def _place(local_points, cx, cy, w, h, theta, flip=1.0) -> list:
     out = []
     for u, v in local_points:
-        dx, dy = u * w, v * h
+        dx, dy = u * w, v * h * flip
         rx, ry = _rotate(dx, dy, theta)
         out.append((cx + rx, cy + ry))
     return out
@@ -93,81 +137,95 @@ def _ellipse_points(n: int = 32) -> list:
             [2 * math.pi * i / n for i in range(n)]]
 
 
-def _tooth_dome(width_frac: float = 1.0) -> list:
-    """Kronenfoermige Kuppel (Kaufflaeche oben/aussen, Zahnhals unten/innen)
-    im lokalen Einheitsquadrat. `width_frac` < 1 fuer eine schmalere
-    (partielle) Variante."""
-    w = width_frac * 0.5
-    return [
-        (-w, 0.15), (-w, -0.1), (-w * 0.7, -0.35), (-w * 0.25, -0.48),
-        (0.0, -0.5), (w * 0.25, -0.48), (w * 0.7, -0.35), (w, -0.1),
-        (w, 0.15), (w * 0.6, 0.4), (0.0, 0.5), (-w * 0.6, 0.4),
-    ]
+def _scale_y(points, factor, offset=0.0):
+    return [(x, y * factor + offset) for x, y in points]
+
+
+def _scale_x(points, factor):
+    return [(x * factor, y) for x, y in points]
 
 
 # ---------------------------------------------------------- Lokale Baupläne
-def _local_ops_implantat():
-    body = [
-        (-0.16, -0.45), (0.16, -0.45), (0.16, 0.15), (0.0, 0.5), (-0.16, 0.15),
-    ]
-    head = [(-0.24, -0.5), (0.24, -0.5), (0.24, -0.42), (-0.24, -0.42)]
-    threads = [
-        [(-0.16, v), (0.16, v)] for v in (-0.25, -0.05, 0.0)
-    ] + [
-        [(-0.13, 0.08), (0.13, 0.08)],
-    ]
+def _local_ops_implantat(_tooth_class):
     c = COLORS[KIND_IMPLANTAT]
+    # Enossaler Anteil: konisch, mit angedeutetem Gewinde; Aufbau/Schulter oben.
+    body = [
+        (-0.17, -0.42), (0.17, -0.42), (0.15, 0.10), (0.0, 0.5), (-0.15, 0.10),
+    ]
+    shoulder = [(-0.25, -0.5), (0.25, -0.5), (0.23, -0.40), (-0.23, -0.40)]
     ops = [
-        ("polygon", body, c["fill"], c["outline"], 2.0, None),
-        ("polygon", head, c["outline"], c["outline"], 1.0, None),
+        DrawOp("polygon", body, c["fill"], c["outline"], 2.0),
+        DrawOp("polygon", shoulder, c["fill"], c["outline"], 1.6),
     ]
-    for seg in threads:
-        ops.append(("line", seg, "", c["outline"], 1.5, None))
+    for v in (-0.28, -0.14, 0.0, 0.14):
+        # Gewindegaenge folgen der konischen Verjuengung.
+        t = (v + 0.42) / 0.92
+        half = 0.17 - t * 0.06
+        ops.append(DrawOp("line", [(-half, v), (half, v)], "", c["outline"], 1.4))
     return ops
 
 
-def _local_ops_krone():
+def _local_ops_krone(tooth_class):
     c = COLORS[KIND_KRONE]
-    return [("polygon", _tooth_dome(1.0), c["fill"], c["outline"], 2.0, None)]
+    return [DrawOp("polygon", anat.crown_profile(tooth_class), c["fill"], c["outline"], 2.2)]
 
 
-def _local_ops_teilkrone():
+def _local_ops_teilkrone(tooth_class):
     c = COLORS[KIND_TEILKRONE]
-    return [("polygon", _tooth_dome(0.85), c["fill"], c["outline"], 2.0, (5, 3))]
-
-
-def _local_ops_nico_fdok():
-    c = COLORS[KIND_NICO_FDOK]
-    ops = [("polygon", _ellipse_points(28), c["fill"], c["outline"], 2.0, (4, 3))]
-    ops.append(("text", [(0.0, 0.72)], "", "", 0, None, "NICO/FDOK", 11, "center"))
+    profile = anat.crown_profile(tooth_class)
+    ops = [DrawOp("polygon", profile, c["fill"], c["outline"], 2.0, (5, 3))]
+    # Praeparationsgrenze andeuten: Teilkrone bedeckt nur den okklusalen Teil.
+    hw = anat.CROWN_HALF_WIDTH[tooth_class]
+    ops.append(DrawOp("line", [(-hw * 0.94, 0.06), (hw * 0.94, 0.06)], "", c["outline"], 1.6, (4, 3)))
     return ops
 
 
-def _local_ops_extraktion():
+def _local_ops_nico_fdok(_tooth_class):
+    c = COLORS[KIND_NICO_FDOK]
+    return [
+        DrawOp("polygon", _ellipse_points(28), c["fill"], c["outline"], 2.0, (4, 3)),
+        # Beschriftung mittig IN der Ellipse - ausserhalb wuerde sie bei
+        # grossen Symbolen ueber die Kontur hinauslaufen.
+        DrawOp("text", [(0.0, 0.0)], "", "", 0, None, "NICO/FDOK", 11, "center"),
+    ]
+
+
+def _local_ops_extraktion(tooth_class):
     c = COLORS[KIND_EXTRAKTION]
-    return [
-        ("line", [(-0.45, -0.45), (0.45, 0.45)], "", c["outline"], 4.0, None),
-        ("line", [(-0.45, 0.45), (0.45, -0.45)], "", c["outline"], 4.0, None),
+    crown, roots = anat.full_tooth_profile(tooth_class)
+    ops = [DrawOp("polygon", crown, "", c["outline"], 1.6, (3, 3))]
+    for root in roots:
+        ops.append(DrawOp("polygon", root, "", c["outline"], 1.6, (3, 3)))
+    # Deutliches Kreuz ueber dem gesamten Zahn.
+    ops += [
+        DrawOp("line", [(-0.44, -0.44), (0.44, 0.44)], "", c["outline"], 4.0),
+        DrawOp("line", [(-0.44, 0.44), (0.44, -0.44)], "", c["outline"], 4.0),
     ]
+    return ops
 
 
-def _local_ops_wurzelbehandlung():
+def _local_ops_wurzelbehandlung(tooth_class):
     c = COLORS[KIND_WURZELBEHANDLUNG]
-    root = [
-        (-0.18, -0.5), (0.18, -0.5), (0.12, 0.1), (0.0, 0.5), (-0.12, 0.1),
-    ]
-    return [
-        ("polygon", root, "", c["outline"], 2.0, None),
-        ("line", [(0.0, -0.45), (0.0, 0.45)], "", c["outline"], 3.0, None),
-    ]
+    crown, roots = anat.full_tooth_profile(tooth_class)
+    share = anat.CROWN_HEIGHT_SHARE[tooth_class]
+    neck_y = -0.5 + share
+
+    ops = [DrawOp("polygon", crown, c["fill"], c["outline"], 1.8)]
+    for root in roots:
+        ops.append(DrawOp("polygon", root, c["fill"], c["outline"], 1.8))
+    # Wurzelfuellung: kraeftige Linie je Kanal.
+    for line in anat.root_canal_lines(tooth_class, top_y=neck_y - 0.02, bottom_y=0.5):
+        ops.append(DrawOp("line", line, "", c["outline"], 3.2))
+    return ops
 
 
-def _local_ops_fehlender_zahn():
+def _local_ops_fehlender_zahn(tooth_class):
     c = COLORS[KIND_FEHLENDER_ZAHN]
-    return [
-        ("polygon", _tooth_dome(1.0), "", c["outline"], 2.0, (3, 4)),
-        ("line", [(-0.5, 0.55), (0.5, 0.55)], "", c["outline"], 1.5, (2, 3)),
-    ]
+    crown, roots = anat.full_tooth_profile(tooth_class)
+    ops = [DrawOp("polygon", crown, "", c["outline"], 1.8, (3, 4))]
+    for root in roots:
+        ops.append(DrawOp("polygon", root, "", c["outline"], 1.8, (3, 4)))
+    return ops
 
 
 _LOCAL_BUILDERS = {
@@ -181,25 +239,40 @@ _LOCAL_BUILDERS = {
 }
 
 
-def _font_size_for(w_px: float, h_px: float) -> int:
-    size = int(round(math.sqrt(max(w_px, 1) * max(h_px, 1)) * 0.22))
-    return max(8, min(size, 48))
+def local_draw_ops(kind: str, fdi_tooth=None) -> list:
+    """DrawOps im lokalen Einheitsquadrat - Basis fuer Canvas, Export sowie
+    die Vorschau-Icons in der Palette."""
+    tooth_class = anat.tooth_class_for(fdi_tooth)
+    return _LOCAL_BUILDERS[kind](tooth_class)
+
+
+def _font_size_for(w_px: float, h_px: float, text: str) -> int:
+    """Schriftgroesse so waehlen, dass die Beschriftung ungefaehr in die
+    Symbolbreite passt - sonst laeuft z. B. 'NICO/FDOK' bei grossen Symbolen
+    weit ueber die Kontur hinaus."""
+    if not text:
+        return 10
+    # Grobe Faustregel: mittlere Zeichenbreite ~0.6 der Schriftgroesse.
+    fit_to_width = (max(w_px, 1) * 1.25) / (len(text) * 0.6)
+    fit_to_height = max(h_px, 1) * 0.22
+    return max(8, min(int(round(min(fit_to_width, fit_to_height))), 40))
 
 
 def _build_simple(item, image_w: int, image_h: int) -> list:
     cx, cy = item.x * image_w, item.y * image_h
     w, h = item.width * image_w, item.height * image_h
     theta = math.radians(item.rotation)
+    flip = arch_flip(item.fdi_tooth) if item.kind in TOOTH_SHAPED_KINDS else 1.0
+
     ops = []
-    for local_op in _LOCAL_BUILDERS[item.kind]():
-        op_kind, local_pts, fill, outline, lw, dash, *rest = local_op
-        pts = _place(local_pts, cx, cy, w, h, theta)
-        if op_kind == "text":
-            text, font_size, anchor = rest
-            ops.append(DrawOp("text", pts, "", "", 0, None, text,
-                               _font_size_for(w, h) if font_size is None else font_size, anchor))
+    for local_op in local_draw_ops(item.kind, item.fdi_tooth):
+        pts = _place(local_op.points, cx, cy, w, h, theta, flip)
+        if local_op.kind == "text":
+            ops.append(DrawOp("text", pts, "", "", 0, None, local_op.text,
+                              _font_size_for(w, h, local_op.text), local_op.anchor))
         else:
-            ops.append(DrawOp(op_kind, pts, fill, outline, lw, dash))
+            ops.append(DrawOp(local_op.kind, pts, local_op.fill, local_op.outline,
+                              local_op.width, local_op.dash))
     return ops
 
 
@@ -239,15 +312,22 @@ def _build_bruecke(item, image_w: int, image_h: int) -> list:
     return ops
 
 
-def transform_local_points(local_points, item, image_w: int, image_h: int) -> list:
+def transform_local_points(local_points, item, image_w: int, image_h: int,
+                            *, apply_flip: bool = False) -> list:
     """Oeffentlicher Zugriff auf die Lokal->Bildpixel-Transformation (Skalierung
     mit item.width/height, Rotation mit item.rotation, Verschiebung nach
     item.x/y). Wird von der Canvas-Ansicht fuer Auswahlrahmen/Greifpunkte
-    verwendet, die exakt zur gezeichneten Symbolgeometrie passen muessen."""
+    verwendet, die exakt zur gezeichneten Symbolgeometrie passen muessen.
+
+    `apply_flip` bezieht zusaetzlich die Ober-/Unterkiefer-Spiegelung ein -
+    fuer Greifpunkte i.d.R. unerwuenscht, damit der Drehgriff immer an
+    derselben Stelle relativ zum Nutzerblick sitzt.
+    """
     cx, cy = item.x * image_w, item.y * image_h
     w, h = item.width * image_w, item.height * image_h
     theta = math.radians(item.rotation)
-    return _place(local_points, cx, cy, w, h, theta)
+    flip = arch_flip(item.fdi_tooth) if (apply_flip and item.kind in TOOTH_SHAPED_KINDS) else 1.0
+    return _place(local_points, cx, cy, w, h, theta, flip)
 
 
 def build_draw_ops(item, image_w: int, image_h: int) -> list:
@@ -264,11 +344,8 @@ def bounding_box(item, image_w: int, image_h: int) -> tuple:
         for op in build_draw_ops(item, image_w, image_h):
             pts.extend(op.points)
     else:
-        cx, cy = item.x * image_w, item.y * image_h
-        w, h = item.width * image_w, item.height * image_h
-        theta = math.radians(item.rotation)
         corners = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)]
-        pts = _place(corners, cx, cy, w, h, theta)
+        pts = transform_local_points(corners, item, image_w, image_h)
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return min(xs), min(ys), max(xs), max(ys)
