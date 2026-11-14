@@ -1,0 +1,61 @@
+name: DVT-Sidexis-Importer bauen
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["dvt-v*"]
+    paths:
+      - "dvt_importer/**"
+      - "tests/**"
+      - "build/**"
+      - "run.py"
+      - "requirements.txt"
+      - ".github/workflows/build-dvt-importer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: DVT-Sidexis-Importer-Windows
+          - os: macos-latest
+            artifact: DVT-Sidexis-Importer-macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Abhängigkeiten installieren
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+      - name: Tests
+        run: python -m pytest tests -q
+      - name: Anwendung bauen
+        run: python build/build.py
+      - name: Selbsttest der fertigen Anwendung (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\DVT-Sidexis-Importer.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Code $($p.ExitCode))" }
+          Compress-Archive -Path "dist\DVT-Sidexis-Importer.exe" -DestinationPath "${{ matrix.artifact }}.zip"
+      - name: Selbsttest der fertigen Anwendung (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dist/DVT-Sidexis-Importer.app/Contents/MacOS/DVT-Sidexis-Importer --selftest
+          ditto -c -k --keepParent dist/DVT-Sidexis-Importer.app "${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+      - name: An Release anhängen
+        if: startsWith(github.ref, 'refs/tags/dvt-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}.zip

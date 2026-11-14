@@ -1,4 +1,10 @@
+import sys
+
+if "--selftest" in sys.argv:
+    from .selftest import run
+
+    sys.exit(run())
+
 from .gui import main
 
-if __name__ == "__main__":
-    main()
+main()

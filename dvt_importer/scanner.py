@@ -1,52 +1,113 @@
-"""Durchsucht ein Quellverzeichnis (z. B. einen fremden USB-Stick) rekursiv nach
-DICOM-Bilddateien und gruppiert sie zu Serien, unabhaengig von Dateiendung oder
-Ordnerstruktur. Liest dabei nur die Header (keine Pixeldaten) fuer Geschwindigkeit.
+"""Durchsucht einen Quellordner (z. B. einen fremden USB-Stick) nach DICOM-Bildern.
+
+Es werden nur die Header gelesen (keine Pixeldaten). Zusammengehörige Schichten
+werden zu Serien gruppiert - unabhängig von Dateinamen, Endungen oder
+Ordnerstruktur. Für jedes DVT-Volumen wird ein Schichtplan berechnet, der die
+Reihenfolge festlegt und fehlende Schichten als Lücken ausweist.
 """
 from __future__ import annotations
 
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 import pydicom
 
-# Unkomprimierte Standard-Transfersyntaxen, die praktisch jeder Viewer lesen kann.
+from .volume import SliceRef, VolumePlan, build_plan
+
 UNCOMPRESSED_TRANSFER_SYNTAXES = {
     "1.2.840.10008.1.2",     # Implicit VR Little Endian
     "1.2.840.10008.1.2.1",   # Explicit VR Little Endian
-    "1.2.840.10008.1.2.2",   # Explicit VR Big Endian (veraltet, aber unkomprimiert)
+    "1.2.840.10008.1.2.2",   # Explicit VR Big Endian
 }
 
-PLAUSIBLE_VOLUME_MODALITIES = {"CT"}
+# Dateien, die sicher keine DICOM-Bilder sind (Viewer-Programme auf dem Stick usw.).
+_SKIP_EXTENSIONS = {
+    ".exe", ".dll", ".msi", ".bat", ".cmd", ".com", ".sys", ".inf", ".ini", ".lnk",
+    ".txt", ".pdf", ".htm", ".html", ".xml", ".json", ".css", ".js", ".chm", ".rtf",
+    ".doc", ".docx", ".xls", ".xlsx", ".csv", ".log", ".md",
+    ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".ico", ".svg",
+    ".zip", ".rar", ".7z", ".gz", ".tar", ".iso", ".cab", ".jar",
+    ".mp4", ".avi", ".mov", ".wmv", ".mp3", ".wav",
+    ".stl", ".ply", ".obj", ".db", ".sqlite", ".dat_", ".app", ".dmg", ".pkg",
+    ".ds_store", ".plist", ".py", ".pyc",
+}
+_SKIP_DIRS = {
+    "$recycle.bin", "system volume information", ".spotlight-v100", ".trashes",
+    ".fseventsd", ".temporaryitems", "__macosx",
+}
+
+# Ab so vielen Schichten gilt eine Graustufen-Serie als 3D-Volumen.
+MIN_VOLUME_SLICES = 5
+
+KIND_VOLUME = "volume"
+KIND_IMAGES = "images"
+
+
+@dataclass
+class PatientData:
+    """Vom Anwender editierbare Angaben, die in die Ausgabe geschrieben werden."""
+
+    last_name: str = ""
+    first_name: str = ""
+    birth_date: str = ""      # JJJJMMTT oder leer
+    sex: str = ""             # M, F, O oder leer
+    patient_id: str = ""
+    study_date: str = ""      # JJJJMMTT oder leer
+    description: str = ""
+
+    def copy(self) -> "PatientData":
+        return PatientData(**self.__dict__)
+
+    @property
+    def display_name(self) -> str:
+        name = ", ".join(p for p in (self.last_name, self.first_name) if p)
+        return name or "(ohne Namen)"
 
 
 @dataclass
 class SeriesInfo:
-    """Eine erkannte Bildserie (i. d. R. ein DVT-Volumen) im Quellverzeichnis."""
+    """Eine erkannte Bildserie - in der Regel ein DVT-Volumen."""
 
     key: str
-    study_uid: Optional[str]
-    series_uid: Optional[str]
-    patient_name: str
-    patient_id: str
+    kind: str
+    patient: PatientData
+    source_study_uid: str
     modality: str
-    series_description: str
+    manufacturer: str
+    model: str
     rows: int
     columns: int
     transfer_syntax: str
     is_compressed: bool
-    file_paths: list = field(default_factory=list)
+    slices: list = field(default_factory=list)       # list[SliceRef]
+    plan: Optional[VolumePlan] = None                # nur bei kind == volume
     warnings: list = field(default_factory=list)
+    source_dir: str = ""
 
     @property
-    def num_slices(self) -> int:
-        return len(self.file_paths)
+    def num_found(self) -> int:
+        return self.plan.num_found if self.plan else len(self.slices)
+
+    @property
+    def num_missing(self) -> int:
+        return self.plan.num_missing if self.plan else 0
+
+    @property
+    def num_output(self) -> int:
+        return len(self.plan.slots) if self.plan else len(self.slices)
+
+    @property
+    def size_label(self) -> str:
+        return f"{self.columns} × {self.rows} × {self.num_output}"
 
     @property
     def display_label(self) -> str:
-        desc = f" - {self.series_description}" if self.series_description else ""
-        return f"{self.patient_name} ({self.patient_id}) | {self.modality}{desc} | {self.num_slices} Bilder"
+        typ = "DVT-Volumen" if self.kind == KIND_VOLUME else "Einzelbild(er)"
+        return f"{self.patient.display_name} | {typ} | {self.size_label}"
 
 
 @dataclass
@@ -56,134 +117,265 @@ class ScanResult:
     total_files_seen: int
 
 
-def _sort_key(ds) -> tuple:
-    inst_no = ds.get("InstanceNumber", None)
+def _text(value) -> str:
+    if value is None:
+        return ""
     try:
-        inst_no = int(inst_no) if inst_no not in (None, "") else None
-    except (ValueError, TypeError):
-        inst_no = None
+        return str(value).strip().strip("\x00").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
-    pos = ds.get("ImagePositionPatient", None)
+
+def _date(value) -> str:
+    digits = re.sub(r"\D", "", _text(value))
+    return digits[:8] if len(digits) >= 8 else ""
+
+
+def _int(value) -> Optional[int]:
     try:
-        z = float(pos[2]) if pos is not None and len(pos) == 3 else None
-    except (ValueError, TypeError, IndexError):
-        z = None
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return None
 
-    slice_loc = ds.get("SliceLocation", None)
+
+def _floats(value, n: int) -> Optional[tuple]:
     try:
-        slice_loc = float(slice_loc) if slice_loc not in (None, "") else None
-    except (ValueError, TypeError):
-        slice_loc = None
+        vals = tuple(float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    return vals if len(vals) == n else None
 
-    # Bevorzugte Reihenfolge: InstanceNumber, sonst raeumliche Position, sonst SliceLocation.
-    return (
-        0 if inst_no is not None else 1,
-        inst_no if inst_no is not None else 0,
-        0 if z is not None else 1,
-        z if z is not None else 0.0,
-        0 if slice_loc is not None else 1,
-        slice_loc if slice_loc is not None else 0.0,
-    )
+
+def _split_name(pn) -> tuple:
+    """DICOM-Personenname ('Nachname^Vorname') in (Nachname, Vorname) zerlegen."""
+    raw = _text(pn)
+    if not raw:
+        return "", ""
+    if "^" in raw:
+        parts = raw.split("=")[0].split("^")
+        return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+    if "," in raw:
+        last, first = raw.split(",", 1)
+        return last.strip(), first.strip()
+    return raw, ""
+
+
+def _looks_like_dicom(path: Path) -> Optional[bool]:
+    """True: sicher DICOM (Präambel). None: unklar, Versuch lohnt. False: sicher nicht."""
+    try:
+        size = path.stat().st_size
+        if size < 64:
+            return False
+        with open(path, "rb") as fh:
+            head = fh.read(132)
+    except OSError:
+        return False
+    if len(head) >= 132 and head[128:132] == b"DICM":
+        return True
+    if path.suffix.lower() in _SKIP_EXTENSIONS:
+        return False
+    # Ohne Präambel: Datei muss mit einem plausiblen DICOM-Tag beginnen.
+    groups = (0x0002, 0x0008, 0x0010, 0x0018, 0x0020, 0x0028)
+    if int.from_bytes(head[:2], "little") in groups or int.from_bytes(head[:2], "big") in groups:
+        return None
+    return False
+
+
+def _frame_geometry(ds, frame_index: int):
+    """Position/Orientierung/Abstände eines Frames aus Multiframe-Sequenzen lesen."""
+    pos = iop = spacing = thickness = None
+    for seq_name, idx in (("PerFrameFunctionalGroupsSequence", frame_index),
+                          ("SharedFunctionalGroupsSequence", 0)):
+        try:
+            item = ds[seq_name].value[idx]
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            if pos is None:
+                pos = _floats(item.PlanePositionSequence[0].ImagePositionPatient, 3)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if iop is None:
+                iop = _floats(item.PlaneOrientationSequence[0].ImageOrientationPatient, 6)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            pm = item.PixelMeasuresSequence[0]
+            if spacing is None:
+                spacing = _floats(pm.get("PixelSpacing"), 2)
+            if thickness is None:
+                thickness = _floats([pm.get("SpacingBetweenSlices") or pm.get("SliceThickness")], 1)
+        except Exception:  # noqa: BLE001
+            pass
+    return pos, iop, spacing, thickness[0] if thickness else None
+
+
+def _read_header(path: Path):
+    kind = _looks_like_dicom(path)
+    if kind is False:
+        return None
+    try:
+        ds = pydicom.dcmread(str(path), force=True, stop_before_pixels=True)
+    except Exception:  # noqa: BLE001
+        return None
+    rows, cols = _int(ds.get("Rows")), _int(ds.get("Columns"))
+    if not rows or not cols or rows < 2 or cols < 2 or rows > 20000 or cols > 20000:
+        return None
+    return ds
 
 
 def scan_source(source_dir, progress_cb: Optional[Callable[[str], None]] = None) -> ScanResult:
-    """Durchsucht `source_dir` rekursiv und liefert ein ScanResult mit gefundenen Serien."""
+    """Durchsucht `source_dir` rekursiv und liefert die gefundenen Serien."""
     source_dir = Path(source_dir)
     groups: dict = {}
     total_seen = 0
     skipped = 0
 
-    for root, _dirs, files in os.walk(source_dir):
-        for fname in files:
+    for root, dirs, files in os.walk(source_dir, onerror=lambda e: None):
+        dirs[:] = sorted(d for d in dirs if d.lower() not in _SKIP_DIRS)
+        for fname in sorted(files):
+            if fname.upper() == "DICOMDIR" or fname.startswith("._"):
+                continue
             path = Path(root) / fname
-            if fname.upper() == "DICOMDIR":
-                continue
-
             total_seen += 1
-            try:
-                ds = pydicom.dcmread(str(path), force=True, stop_before_pixels=True)
-            except Exception:
+            if progress_cb and total_seen % 25 == 0:
+                progress_cb(f"{total_seen} Dateien geprüft, {len(groups)} Serie(n) erkannt …")
+
+            ds = _read_header(path)
+            if ds is None:
                 skipped += 1
                 continue
 
-            if "Rows" not in ds or "Columns" not in ds:
-                # Kein Bild (z.B. Strukturbericht, defekte Datei, Fremdformat) -> ueberspringen.
-                skipped += 1
-                continue
+            rows, cols = int(ds.Rows), int(ds.Columns)
+            frames = _int(ds.get("NumberOfFrames")) or 1
+            samples = _int(ds.get("SamplesPerPixel")) or 1
+            study_uid = _text(ds.get("StudyInstanceUID"))
+            series_uid = _text(ds.get("SeriesInstanceUID"))
+            iop = _floats(ds.get("ImageOrientationPatient"), 6)
+            iop_key = tuple(round(v, 2) for v in iop) if iop else None
 
-            study_uid = getattr(ds, "StudyInstanceUID", None)
-            series_uid = getattr(ds, "SeriesInstanceUID", None)
-
-            if study_uid and series_uid:
-                key = ("UID", str(study_uid), str(series_uid))
+            if frames > 1:
+                # Jede Multiframe-Datei ist ein eigenes Volumen.
+                key = ("MF", str(path))
+            elif series_uid:
+                key = ("UID", study_uid, series_uid, rows, cols, samples, iop_key)
             else:
-                # Fallback, wenn UIDs fehlen: nach Ordner gruppieren (typisch bei
-                # einfachen DVT-Exporten, die einen Ordner pro Volumen anlegen).
-                key = ("DIR", str(path.parent))
+                key = ("DIR", str(path.parent), rows, cols, samples, iop_key)
 
-            if key not in groups:
+            g = groups.get(key)
+            if g is None:
                 ts = ""
-                if hasattr(ds, "file_meta") and "TransferSyntaxUID" in ds.file_meta:
-                    ts = str(ds.file_meta.TransferSyntaxUID)
-                groups[key] = {
-                    "study_uid": str(study_uid) if study_uid else None,
-                    "series_uid": str(series_uid) if series_uid else None,
-                    "patient_name": str(getattr(ds, "PatientName", "")).strip() or "Unbekannt",
-                    "patient_id": str(getattr(ds, "PatientID", "")).strip() or "UNBEKANNT",
-                    "modality": str(getattr(ds, "Modality", "")).strip(),
-                    "series_description": str(getattr(ds, "SeriesDescription", "")).strip(),
-                    "rows": int(getattr(ds, "Rows", 0)),
-                    "columns": int(getattr(ds, "Columns", 0)),
-                    "transfer_syntax": ts,
-                    "items": [],
+                try:
+                    ts = _text(ds.file_meta.get("TransferSyntaxUID"))
+                except Exception:  # noqa: BLE001
+                    pass
+                last, first = _split_name(ds.get("PatientName"))
+                sex = _text(ds.get("PatientSex")).upper()[:1]
+                g = groups[key] = {
+                    "patient": PatientData(
+                        last_name=last,
+                        first_name=first,
+                        birth_date=_date(ds.get("PatientBirthDate")),
+                        sex=sex if sex in ("M", "F", "O") else "",
+                        patient_id=_text(ds.get("PatientID")),
+                        study_date=_date(ds.get("StudyDate")) or _date(ds.get("SeriesDate"))
+                        or _date(ds.get("AcquisitionDate")) or _date(ds.get("ContentDate")),
+                        description=_text(ds.get("SeriesDescription")) or _text(ds.get("StudyDescription")),
+                    ),
+                    "study_uid": study_uid,
+                    "has_series_uid": bool(series_uid),
+                    "modality": _text(ds.get("Modality")),
+                    "manufacturer": _text(ds.get("Manufacturer")),
+                    "model": _text(ds.get("ManufacturerModelName")),
+                    "rows": rows, "cols": cols, "samples": samples,
+                    "ts": ts, "dir": str(path.parent),
+                    "slices": [], "iops": [], "pix": [], "thick": [],
                 }
 
-            groups[key]["items"].append((_sort_key(ds), path))
+            if frames > 1:
+                for f in range(frames):
+                    pos, f_iop, f_sp, f_th = _frame_geometry(ds, f)
+                    g["slices"].append(SliceRef(path=path, frame=f, instance_number=f + 1, position=pos))
+                    if f_iop:
+                        g["iops"].append(f_iop)
+                    if f_sp:
+                        g["pix"].append(f_sp)
+                    if f_th:
+                        g["thick"].append(f_th)
+                top_pos = _floats(ds.get("ImagePositionPatient"), 3)
+                if top_pos and all(s.position is None for s in g["slices"]):
+                    g["top_pos"] = top_pos
+            else:
+                g["slices"].append(SliceRef(
+                    path=path, frame=None,
+                    instance_number=_int(ds.get("InstanceNumber")),
+                    position=_floats(ds.get("ImagePositionPatient"), 3),
+                ))
 
-            if progress_cb:
-                progress_cb(f"{len(groups)} Serie(n) erkannt, {total_seen} Dateien gelesen ...")
+            if iop:
+                g["iops"].append(iop)
+            sp = _floats(ds.get("PixelSpacing"), 2) or _floats(ds.get("ImagerPixelSpacing"), 2)
+            if sp:
+                g["pix"].append(sp)
+            th = _floats([ds.get("SpacingBetweenSlices") or ds.get("SliceThickness")], 1)
+            if th and th[0] > 0:
+                g["thick"].append(th[0])
 
     series_list = []
-    for key, info in groups.items():
+    for key, g in groups.items():
         warnings = []
-        if not info["study_uid"]:
-            warnings.append("Keine Study-UID gefunden - wird neu erzeugt")
-        if not info["series_uid"]:
-            warnings.append("Keine Series-UID gefunden - wird neu erzeugt")
-        if info["modality"] not in PLAUSIBLE_VOLUME_MODALITIES:
-            warnings.append(
-                f"Modality '{info['modality'] or '(leer)'}' unueblich fuer ein DVT-Volumen - wird auf CT gesetzt"
-            )
-        ts = info["transfer_syntax"]
+        ts = g["ts"]
         compressed = bool(ts) and ts not in UNCOMPRESSED_TRANSFER_SYNTAXES
-        if compressed:
-            warnings.append(f"Komprimierte Bilddaten (Transfersyntax {ts}) - werden verlustfrei dekomprimiert")
-        if info["patient_id"] == "UNBEKANNT":
-            warnings.append("Keine Patienten-ID im DICOM-Header gefunden")
-        if info["rows"] <= 1 or info["columns"] <= 1:
-            warnings.append("Ungewoehnliche Bildgroesse - bitte Ergebnis pruefen")
+        is_volume = g["samples"] == 1 and len(g["slices"]) >= MIN_VOLUME_SLICES
 
-        items = sorted(info["items"], key=lambda t: t[0])
-        file_paths = [p for _sk, p in items]
-
-        series_list.append(
-            SeriesInfo(
-                key="|".join(key),
-                study_uid=info["study_uid"],
-                series_uid=info["series_uid"],
-                patient_name=info["patient_name"],
-                patient_id=info["patient_id"],
-                modality=info["modality"] or "CT",
-                series_description=info["series_description"],
-                rows=info["rows"],
-                columns=info["columns"],
-                transfer_syntax=ts,
-                is_compressed=compressed,
-                file_paths=file_paths,
-                warnings=warnings,
+        plan = None
+        if is_volume:
+            iop = Counter(tuple(round(v, 4) for v in i) for i in g["iops"]).most_common(1)
+            pix = Counter(tuple(round(v, 5) for v in p) for p in g["pix"]).most_common(1)
+            thick = Counter(round(t, 5) for t in g["thick"]).most_common(1)
+            plan = build_plan(
+                g["slices"],
+                iop=iop[0][0] if iop else None,
+                pixel_spacing=pix[0][0] if pix else None,
+                slice_spacing_hint=thick[0][0] if thick else None,
+                origin_hint=g.get("top_pos"),
             )
-        )
+            warnings.extend(plan.notes)
+            if g["modality"] != "CT":
+                warnings.append(f"Modalität „{g['modality'] or 'leer'}“ wird auf CT gesetzt")
+            if key[0] == "MF":
+                warnings.append("Multiframe-Datei wird in Einzelschichten zerlegt")
+            if compressed:
+                warnings.append("Komprimierte Bilddaten werden entpackt")
+            if not g["has_series_uid"]:
+                warnings.append("Kennungen (UIDs) fehlten und werden neu erzeugt")
+        else:
+            if g["samples"] != 1:
+                warnings.append("Farbbild(er), kein DVT-Volumen")
+            else:
+                warnings.append("Zu wenige Schichten für ein DVT-Volumen")
 
-    series_list.sort(key=lambda s: (s.patient_id, s.study_uid or "", s.series_uid or ""))
+        if not g["patient"].last_name:
+            warnings.append("Kein Patientenname in den Daten")
 
+        series_list.append(SeriesInfo(
+            key="|".join(str(k) for k in key),
+            kind=KIND_VOLUME if is_volume else KIND_IMAGES,
+            patient=g["patient"],
+            source_study_uid=g["study_uid"],
+            modality=g["modality"],
+            manufacturer=g["manufacturer"],
+            model=g["model"],
+            rows=g["rows"], columns=g["cols"],
+            transfer_syntax=ts,
+            is_compressed=compressed,
+            slices=g["slices"],
+            plan=plan,
+            warnings=warnings,
+            source_dir=g["dir"],
+        ))
+
+    # Volumen zuerst, größte zuerst.
+    series_list.sort(key=lambda s: (s.kind != KIND_VOLUME, -s.num_output, s.key))
     return ScanResult(series=series_list, skipped_files=skipped, total_files_seen=total_seen)

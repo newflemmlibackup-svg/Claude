@@ -1,160 +1,139 @@
 # DVT-Sidexis-Importer
 
-Kleines Werkzeug mit grafischer Oberflaeche fuer die Zahnarztpraxis: liest
-DVT-/DICOM-Datensaetze von fremden Behandlern (z. B. von einem mitgebrachten
-USB-Stick) ein, repariert die haeufigsten Kompatibilitaetsprobleme und
-schreibt einen neuen Ordner, der sich in **Sidexis** ueber
-`Datei > Import > DICOM` importieren laesst.
+Programm für die Zahnarztpraxis: liest DVT-Aufnahmen fremder Behandler
+(DICOM, z. B. vom mitgebrachten USB-Stick oder einer CD), repariert sie und
+schreibt sie so neu, dass sie sich in **Sidexis** importieren lassen.
 
-## Warum lassen sich manche fremden DVTs nicht in Sidexis importieren?
-
-Viele DVT-/CBCT-Geraete exportieren zwar "DICOM"-Dateien, aber Sidexis'
-Import basiert auf einer **DICOMDIR**-Datei (dem Standard-Inhaltsverzeichnis
-eines DICOM-Datentraegers). Typische Ursachen fuer einen fehlgeschlagenen
-Import sind:
-
-- **Keine (gueltige) DICOMDIR** vorhanden – manche Geraete-Software exportiert
-  nur die einzelnen Bilddateien ohne Inhaltsverzeichnis.
-- **Fehlende oder inkonsistente UIDs** (Study-/Series-/SOP-Instance-UID), so
-  dass Sidexis die Bilder keiner Studie/Serie zuordnen kann.
-- **Komprimierte Bilddaten** (z. B. JPEG2000), deren Transfersyntax vom
-  Sidexis-DICOM-Codec nicht unterstuetzt wird.
-- **Unpassendes oder fehlendes `Modality`-Tag** – ein DVT-Volumen muss als
-  `CT` gekennzeichnet sein, damit Sidexis es als 3D-Datensatz erkennt.
-- **Nicht-konforme Datei-/Ordnerstruktur** (z. B. Dateien ohne Endung,
-  beliebige Verschachtelung), auf die sich der automatische Import ohne
-  DICOMDIR nicht verlassen kann.
-
-Dieses Tool liest alle Dateien im gewaehlten Quellordner unabhaengig von
-Dateiname/-endung ein, erkennt zusammengehoerige Bildserien, behebt die oben
-genannten Punkte und baut mit `pydicom` ein neues, DICOM-konformes Fileset
-inklusive gueltiger DICOMDIR neu auf.
-
-## Voraussetzungen
-
-- Sidexis selbst laeuft nur unter Windows – der eigentliche Import muss also
-  am Windows-Praxis-PC erfolgen. Die **Konvertierung** kann aber auch auf
-  einem Mac laufen (z. B. wenn dort der Fremd-Stick zuerst gesichtet wird);
-  den erzeugten Zielordner dann per Netzwerk/USB an den Sidexis-PC uebergeben.
-- Entweder die fertige App fuer die eigene Plattform (siehe `build/`,
-  `DVT-Sidexis-Importer.exe` fuer Windows bzw. `DVT-Sidexis-Importer.app` fuer
-  macOS) **oder** Python 3.10+ mit den Paketen aus `requirements.txt`.
+Läuft unter **Windows** und **macOS**. (Sidexis selbst gibt es nur für Windows –
+am Mac aufbereitete Aufnahmen werden einfach per Netzlaufwerk oder Stick zum
+Sidexis-PC gebracht.)
 
 ## Bedienung
 
-1. **Fremden USB-Stick auswaehlen**: Ordner/Laufwerk mit dem DVT-Export des
-   Fremdbehandlers auswaehlen und auf **"Scannen"** klicken.
-2. Das Tool zeigt alle gefundenen Serien mit Patient, Modalitaet, Anzahl
-   Bilder und erkannten Problemen ("Hinweise") an. Serien an-/abwaehlen
-   (Standard: alle ausgewaehlt).
-3. **Zielordner waehlen** (leerer, neuer Ordner empfohlen).
-4. Auf **"Konvertieren"** klicken. Der Fortschritt und ein Protokoll werden
-   angezeigt.
-5. Nach Abschluss: den Zielordner in Sidexis ueber
-   **Datei > Import > DICOM** auswaehlen (bzw. die darin liegende
-   `DICOMDIR`-Datei).
+1. **Stick einstecken.** Das Programm erkennt neue USB-Sticks und CDs von
+   selbst und analysiert sie sofort. Alternativ über *Anderen Ordner wählen …*
+   einen beliebigen Ordner angeben.
+2. **Prüfen und Patientendaten einstellen.** Die gefundenen Aufnahmen werden
+   aufgelistet, samt Hinweisen (z. B. „3 fehlende Schichten werden schwarz
+   ergänzt“). Rechts lassen sich Nachname, Vorname, Geburtsdatum, Geschlecht,
+   Patienten-Nr., Aufnahmedatum und Bezeichnung ändern – am besten genau so,
+   wie der Patient in Sidexis angelegt ist.
+3. **Für Sidexis aufbereiten** klicken. Das Ergebnis landet in
+   `Dokumente/DVT-Sidexis-Import/<Name>_<Datum>` (Speicherort änderbar).
+4. In Sidexis den DICOM-Import aufrufen und diesen Ordner bzw. die darin
+   liegende Datei `DICOMDIR` auswählen.
 
-> **Wichtig:** Der Original-USB-Stick des Fremdbehandlers wird nur gelesen,
-> nie veraendert. Bitte das Konvertierungsergebnis vor der klinischen
-> Verwendung stichprobenartig mit dem Original vergleichen (z. B. Anzahl
-> Schichten, Patientendaten) – das Tool arbeitet mit Heuristiken, um auch mit
-> unvollstaendigen Fremd-Daten zurechtzukommen.
+Der Original-Datenträger wird nur gelesen und nie verändert.
 
-## Installation aus dem Quellcode
+## Was das Programm repariert
 
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/Mac:
-source .venv/bin/activate
+Jede Schicht wird **komplett neu aufgebaut** – aus den Fremddaten werden nur
+die Bildpunkte und wenige geprüfte Angaben übernommen. Das Ergebnis ist daher
+immer gleich aufgebaut, egal von welchem Gerät die Aufnahme stammt:
 
-pip install -r requirements.txt
-python -m dvt_importer
-```
+| Problem in den Fremddaten | Was passiert |
+|---|---|
+| Einzelne Schichten fehlen | Lücke wird erkannt (über Position bzw. Bildnummer) und mit **schwarzen Schichten** gefüllt |
+| Datei beschädigt / Bilddaten unlesbar | Schicht wird durch eine schwarze ersetzt |
+| Datei abgeschnitten | Vorhandener Teil bleibt erhalten, der Rest wird schwarz |
+| Komprimiert (JPEG, JPEG 2000, RLE) | Wird verlustfrei entpackt |
+| Eine große Multiframe-Datei („Enhanced CT“) | Wird in klassische Einzelschichten zerlegt |
+| Keine/defekte `DICOMDIR`, fehlende UIDs | Neue, stimmige Kennungen und gültige `DICOMDIR` |
+| Falsche Modalität (z. B. `OT`) | Wird auf `CT` gesetzt |
+| Schichten unsortiert, Dateinamen ohne Endung, verschachtelte Ordner | Wird unabhängig von Namen sortiert und einheitlich abgelegt |
+| Ungleichmäßige Schichtabstände, doppelte Schichten | Exakt gleichmäßige Abstände, Duplikate entfernt |
+| Herstellereigene Zusatzfelder, 8/12-Bit-Sonderformate | Einheitlich 16 Bit Graustufen, nur Standardfelder |
 
-## Eigenstaendige Windows-.exe bauen
+„Schwarz“ bedeutet: der dunkelste Wert der Aufnahme (Luft), damit die
+Ersatzschichten in der 3D-Ansicht nicht als heller Balken erscheinen.
 
-Auf einem Windows-Rechner mit installiertem Python:
+Nach dem Schreiben liest das Programm das Ergebnis zur Kontrolle noch einmal
+ein und meldet, ob alles vollständig ist.
+
+## Wichtige Hinweise
+
+- **Bitte einmal mit echten Aufnahmen in Sidexis gegenprüfen.** Das Programm
+  wurde mit vielen künstlich beschädigten Testdaten geprüft, konnte bei der
+  Entwicklung aber nicht direkt gegen Sidexis getestet werden. Klappt der
+  Import bei einem bestimmten Fremdgerät nicht, hilft die Option *Zusätzlich
+  einfache .dcm-Einzeldateien schreiben* (zweiter Ordner ohne `DICOMDIR`).
+- **Schwarze Ersatzschichten enthalten keine Bildinformation.** An diesen
+  Stellen fehlt Diagnostik – das Programm zeigt die Anzahl deutlich an.
+- **Voxelgröße:** Fehlt sie in den Fremddaten, warnt das Programm; Messungen
+  sind dann nicht verlässlich.
+- Fehlen Schichten ganz am Anfang oder Ende, kann das nicht erkannt werden.
+- ZIP-Dateien auf dem Stick müssen vorher entpackt werden.
+- Das Programm ersetzt keine fachliche Kontrolle der Bilder.
+
+## Installation
+
+### Fertige Programme
+
+Bei jeder Änderung baut GitHub automatisch beide Versionen (Reiter **Actions**
+→ letzter Lauf „DVT-Sidexis-Importer bauen“ → **Artifacts**):
+
+- `DVT-Sidexis-Importer-Windows.zip` – enthält eine einzelne `.exe`, keine
+  Installation nötig.
+- `DVT-Sidexis-Importer-macOS.zip` – enthält die `.app` (für Macs mit
+  Apple-Chip).
+
+Beim ersten Start warnt das Betriebssystem, weil das Programm nicht
+kostenpflichtig signiert ist:
+
+- **Windows:** „Der Computer wurde durch Windows geschützt“ → *Weitere
+  Informationen* → *Trotzdem ausführen*.
+- **macOS:** App mit Rechtsklick → *Öffnen* starten; oder
+  *Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen*.
+
+### Selbst bauen
+
+Mit installiertem Python 3.10+ (von python.org):
 
 ```bat
 build\build_windows_exe.bat
 ```
 
-Die fertige Datei liegt danach unter `dist\DVT-Sidexis-Importer.exe` und kann
-ohne weitere Installation auf anderen Praxis-PCs verteilt werden.
-
-## Eigenstaendige macOS-App bauen
-
-Auf einem Mac mit installiertem Python 3 (empfohlen: der offizielle Installer
-von [python.org](https://www.python.org/downloads/macos/), der Tkinter schon
-mitbringt; bei Homebrew-Python zusaetzlich `brew install python-tk`):
-
 ```bash
-chmod +x build/build_macos_app.sh   # nur beim allerersten Mal noetig
 ./build/build_macos_app.sh
 ```
 
-Die fertige App liegt danach unter `dist/DVT-Sidexis-Importer.app` und kann
-per Doppelklick gestartet werden.
+### Aus dem Quellcode starten
 
-**Gatekeeper-Hinweis:** Da die App nicht mit einem kostenpflichtigen
-Apple-Entwicklerzertifikat signiert ist, meldet macOS beim allerersten Start
-auf einem anderen Mac (bzw. nach dem Kopieren/Herunterladen) vermutlich
-*"kann nicht geoeffnet werden, da der Entwickler nicht verifiziert werden
-kann"*. Einmalig genuegt: App mit **Rechtsklick > Oeffnen** starten und im
-Dialog erneut **Oeffnen** bestaetigen (alternativ: **Systemeinstellungen >
-Datenschutz & Sicherheit** > "Trotzdem oeffnen"). Das ist nur beim ersten
-Start noetig.
+```bash
+pip install -r requirements.txt
+```
 
-Falls PyInstaller unter Homebrew-Python beim `--windowed`-Build mit einem
-Tkinter-/Framework-Fehler abbricht: sicherstellen, dass `python3` (siehe
-Ausgabe von `which python3`) tatsaechlich der python.org- oder
-Homebrew-Python mit Framework-Build ist, nicht eine minimalistische
-Alternativinstallation.
+```bash
+python -m dvt_importer
+```
 
-Wichtig fuer beide Plattformen: PyInstaller baut nur fuer die Plattform (und
-bei macOS auch nur fuer die Prozessorarchitektur – Apple Silicon/M-Chips vs.
-Intel), auf der es ausgefuehrt wird. Wer die App fuer beide Mac-Architekturen
-verteilen will, muss den Build-Schritt auf je einem Intel- und einem
-Apple-Silicon-Mac ausfuehren (oder ein Universal2-Python verwenden).
-
-## Entwicklung / Tests
+## Entwicklung
 
 ```bash
 pip install -r requirements.txt pytest
-python -m pytest tests/
 ```
 
-Die Tests erzeugen synthetische, absichtlich "kaputte" Beispiel-DVT-Daten
-(fehlende UIDs, falsches Modality-Tag, keine DICOMDIR, keine Dateiendungen)
-und pruefen den kompletten Ablauf von `scan_source()` bis zum fertigen,
-wieder einlesbaren DICOM-Fileset.
+```bash
+python -m pytest tests
+```
 
-## Aufbau des Projekts
+```bash
+python -m dvt_importer --selftest
+```
 
 ```
 dvt_importer/
-  scanner.py     Durchsucht den Quellordner und gruppiert Dateien zu Serien
-  converter.py   Normalisiert die Daten und schreibt DICOMDIR + Bilddateien
-  gui.py         Tkinter-Bedienoberflaeche
-  __main__.py    Einstiegspunkt (`python -m dvt_importer`)
-run.py           Einstiegspunkt fuer PyInstaller-Builds (Windows/macOS)
-tests/           Automatisierte Tests (pytest)
-build/           Skripte zum Bauen einer Windows-.exe bzw. macOS-.app
+  scanner.py    Findet DICOM-Bilder und gruppiert sie zu Aufnahmen
+  volume.py     Schichtreihenfolge, Geometrie, Lückenerkennung
+  converter.py  Baut die Schichten neu auf, schreibt Medium + DICOMDIR, Abschlussprüfung
+  drives.py     Erkennung von USB-Sticks/CDs (Windows, macOS, Linux)
+  gui.py        Bedienoberfläche
+  selftest.py   Selbsttest der fertig gebauten Anwendung
+build/          Build-Skripte (PyInstaller)
+tests/          Automatische Tests mit künstlich beschädigten DVT-Daten
 ```
 
-## Grenzen
+---
 
-- Fehlen in den Quelldaten sowohl Study- als auch Series-UID, wird anhand der
-  Ordnerstruktur gruppiert (ein Ordner = eine Serie). Bei ungewoehnlichen
-  Exporten (mehrere Serien in einem Ordner ohne UIDs) kann das zu falscher
-  Gruppierung fuehren – in diesem Fall bitte die Ordner vor dem Scannen manuell
-  trennen.
-- Fuer komprimierte Bilddaten (JPEG/JPEG2000) werden die Pakete
-  `pylibjpeg`/`pylibjpeg-openjpeg` benoetigt. Fehlt die Dekodierung, wird dies
-  im Protokoll als Warnung ausgegeben und die betroffene Serie im
-  Originalzustand uebernommen (kann dann ggf. weiterhin nicht importierbar
-  sein).
-- Das Tool ersetzt keine Pruefung durch Fachpersonal: Bild- und Patientendaten
-  vor klinischer Nutzung immer verifizieren.
+Im Ordner `behandlungsplaner/` liegt ein davon unabhängiges zweites Werkzeug
+(siehe dortige Beschreibung).

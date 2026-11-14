@@ -1,65 +1,72 @@
-"""Smoke-Test fuer die Tkinter-GUI: prueft, dass sich das Fenster aufbauen laesst
-und der komplette Scan->Auswahl->Konvertieren-Ablauf ohne Exceptions durchlaeuft.
-Erfordert ein (ggf. virtuelles, z.B. Xvfb) Display; wird sonst uebersprungen.
+"""Smoke-Test der Tkinter-Oberfläche: Analyse -> Patientendaten ändern -> Aufbereiten.
+Benötigt ein (ggf. virtuelles, z. B. Xvfb) Display; wird sonst übersprungen.
 """
 import os
+import sys
 
+import pydicom
 import pytest
+from pydicom.fileset import FileSet
 
 tk = pytest.importorskip("tkinter")
 
-from tests.test_pipeline import make_broken_no_uid_export  # noqa: E402
+from tests.test_pipeline import make_export  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    sys.platform.startswith("linux") and not os.environ.get("DISPLAY"), reason="Kein Display verfügbar")
 
 
-def _tk_available() -> bool:
+def _drain(app):
+    while not app._queue.empty():
+        app._handle(*app._queue.get_nowait())
+
+
+def test_date_helpers():
+    from dvt_importer.gui import format_date, parse_date
+
+    assert parse_date("24.12.1985") == "19851224"
+    assert parse_date("3.4.85") == "19850403"
+    assert parse_date("24121985") == "19851224"
+    assert parse_date("19851224") == "19851224"
+    assert parse_date("") == ""
+    assert format_date("19851224") == "24.12.1985"
+
+
+def test_gui_full_flow(tmp_path, monkeypatch):
     try:
-        root = tk.Tk()
-        root.destroy()
-        return True
+        from dvt_importer.gui import DvtImporterApp
+        app = DvtImporterApp()
     except tk.TclError:
-        return False
+        pytest.skip("Tk kann kein Fenster öffnen")
 
+    from tkinter import messagebox
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setattr(messagebox, "showwarning", lambda *a, **k: None)
 
-pytestmark = pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="Kein Display verfuegbar")
-
-
-def test_gui_full_flow(tmp_path):
-    if not _tk_available():
-        pytest.skip("Tk kann kein Fenster oeffnen (kein funktionierendes Display)")
-
-    from dvt_importer.gui import DvtImporterApp
-
-    source = tmp_path / "usb"
-    make_broken_no_uid_export(source, num_slices=5)
-    dest = tmp_path / "sidexis_out"
-
-    app = DvtImporterApp()
+    make_export(tmp_path / "usb", [1, 2, 3, 5, 6, 7, 8])   # Schicht 4 fehlt
     try:
-        app.source_dir = source
-        app._scan_worker()  # synchron statt in eigenem Thread
+        app.source_dir = tmp_path / "usb"
+        app._scan_worker()
+        _drain(app)
+        assert len(app.row_to_series) == 1 and len(app.selected_keys) == 1
+        app.update()
+        assert app.current_series is not None
+        assert app.form_vars["last_name"].get() == "Mustermann"
+        assert app.form_vars["birth_date"].get() == "15.03.1970"
 
-        # Queue wie beim regulaeren Polling abarbeiten.
-        while not app._log_queue.empty():
-            kind, payload = app._log_queue.get_nowait()
-            if kind == "SCAN_RESULT":
-                app._populate_tree(payload)
+        app.form_vars["last_name"].set("Müller")
+        app.form_vars["birth_date"].set("24.12.1985")
+        app.form_vars["sex"].set("weiblich")
+        p = app.current_series.patient
+        assert (p.last_name, p.birth_date, p.sex) == ("Müller", "19851224", "F")
 
-        assert len(app.row_id_to_series) == 1
-        app._select_all()
-        assert len(app.selected_keys) == 1
+        out = tmp_path / "out"
+        app._convert_worker(app._selected_series(), out, False)
+        _drain(app)
+        assert app.last_output == out
 
-        app.dest_dir = dest
-        selected_series = [s for s in app.scan_result.series if s.key in app.selected_keys]
-        app._convert_worker(selected_series)
-
-        result = None
-        while not app._log_queue.empty():
-            kind, payload = app._log_queue.get_nowait()
-            if kind == "CONVERT_RESULT":
-                result = payload
-
-        assert result is not None
-        assert result.images_converted == 5
-        assert (dest / "DICOMDIR").exists()
+        instances = [pydicom.dcmread(i.path) for i in FileSet(str(out / "DICOMDIR"))]
+        assert len(instances) == 8
+        assert {str(d.PatientName) for d in instances} == {"Müller^Erika"}
     finally:
         app.destroy()

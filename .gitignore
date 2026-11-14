@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .venv_gui/
 .pytest_cache/
-build/dist/
 dist/
+build/spec/
+build/work/
 *.spec
