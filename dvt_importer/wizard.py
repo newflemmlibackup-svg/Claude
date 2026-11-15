@@ -11,7 +11,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .converter import FLAT_SUFFIX, convert_series_list, validate_patient
-from .drives import list_removable_drives, open_in_file_manager
+from .drives import cached_removable_drives as list_removable_drives
+from .drives import open_in_file_manager
 from .preview import PreviewPanel
 from .scanner import KIND_VOLUME, scan_source
 

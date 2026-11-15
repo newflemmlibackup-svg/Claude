@@ -12,7 +12,12 @@ def _start() -> int:
 
         return run()
     try:
+        from dvt_importer.crashlog import start_trace
+
+        start_trace("Programm gestartet")
         from dvt_importer.gui import main
+
+        start_trace("Module geladen")
 
         main()
         return 0

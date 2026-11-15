@@ -59,18 +59,84 @@ def _mounted_under(*parents) -> list:
     return drives
 
 
+_NETWORK_FS = {"smbfs", "afpfs", "nfs", "webdav", "autofs", "ftp", "cifs", "fuse.sshfs", "devfs"}
+
+
+def _macos_drives() -> list:
+    """Eingebundene Datenträger unter /Volumes aus der Ausgabe von `mount`.
+
+    Bewusst ohne Dateizugriffe auf die Volumes selbst: Ein nicht erreichbares
+    Netzlaufwerk (Praxis-Server) würde solche Zugriffe minutenlang blockieren.
+    """
+    import re
+    import subprocess
+
+    out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=5).stdout
+    drives = []
+    for line in out.splitlines():
+        m = re.match(r"^(.*?) on (/Volumes/.+?) \(([^,)]+)", line)
+        if not m:
+            continue
+        path, fs_type = m.group(2), m.group(3).strip().lower()
+        if fs_type in _NETWORK_FS or "/" in path[len("/Volumes/"):]:
+            continue
+        drives.append(Drive(path=path, label=path[len("/Volumes/"):]))
+    return sorted(drives, key=lambda d: d.path)
+
+
 def list_removable_drives() -> list:
     """Liste der aktuell eingebundenen Wechseldatenträger (leer, wenn keine gefunden)."""
     try:
         if sys.platform == "win32":
             return _windows_drives()
         if sys.platform == "darwin":
-            # /Volumes enthält das Startvolume nur als Symlink - der wird übersprungen.
-            return _mounted_under("/Volumes")
+            return _macos_drives()
         user = getpass.getuser()
         return _mounted_under(f"/media/{user}", f"/run/media/{user}", "/media", "/mnt")
     except Exception:  # noqa: BLE001
         return []
+
+
+class _DriveWatcher:
+    """Fragt die Datenträger in einem Hintergrund-Thread ab.
+
+    Die Oberfläche liest nur das zuletzt ermittelte Ergebnis und kann deshalb
+    nie hängen bleiben - egal wie lange das Betriebssystem für die Antwort braucht.
+    """
+
+    def __init__(self, interval: float = 2.0):
+        import threading
+
+        self._interval = interval
+        self._latest: list = []
+        self._started = False
+        self._lock = threading.Lock()
+
+    def latest(self) -> list:
+        import threading
+
+        with self._lock:
+            if not self._started:
+                self._started = True
+                threading.Thread(target=self._run, daemon=True, name="drive-watcher").start()
+            return list(self._latest)
+
+    def _run(self):
+        import time
+
+        while True:
+            drives = list_removable_drives()
+            with self._lock:
+                self._latest = drives
+            time.sleep(self._interval)
+
+
+_watcher = _DriveWatcher()
+
+
+def cached_removable_drives() -> list:
+    """Zuletzt bekannte Datenträger - kehrt sofort zurück (anfangs ggf. leere Liste)."""
+    return _watcher.latest()
 
 
 def open_in_file_manager(path) -> None:

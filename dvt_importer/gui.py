@@ -19,7 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .converter import FLAT_SUFFIX, ConversionError, convert_series_list, validate_patient
-from .drives import list_removable_drives, open_in_file_manager
+from .drives import cached_removable_drives as list_removable_drives
+from .drives import open_in_file_manager
 from .scanner import KIND_VOLUME, scan_source
 
 CHECK_ON = "☑"
@@ -108,7 +109,8 @@ class DvtImporterApp(tk.Tk):
         self._known_drive_paths: set | None = None
 
         self._build_widgets()
-        self._refresh_drives()
+        # Erst das Fenster zeigen, dann nach Datenträgern suchen.
+        self.after(300, self._refresh_drives)
         self.after(100, self._poll_queue)
 
     # ================================================================== Aufbau
@@ -268,6 +270,12 @@ class DvtImporterApp(tk.Tk):
         drives = list_removable_drives()
         paths = {d.path for d in drives}
         new = [] if self._known_drive_paths is None else [d for d in drives if d.path not in self._known_drive_paths]
+        self._drive_polls = getattr(self, "_drive_polls", 0) + 1
+        if self._drive_polls <= 2:
+            # Die Abfrage läuft im Hintergrund; beim Start das erste Ergebnis abwarten,
+            # damit schon eingesteckte Sticks nicht als "neu" gelten.
+            self._known_drive_paths = None
+            new = []
         first_run = self._known_drive_paths is None
         self._known_drive_paths = paths
         if [d.path for d in drives] != [d.path for d in self._drives]:
@@ -283,7 +291,7 @@ class DvtImporterApp(tk.Tk):
                 self._set_source(Path(drives[0].path), drives[0].display)
             elif self.source_dir is None and not drives:
                 self.source_var.set("Kein Wechseldatenträger gefunden – bitte einstecken oder Ordner wählen")
-        self.after(DRIVE_POLL_MS, self._refresh_drives)
+        self.after(700 if self._drive_polls <= 2 else DRIVE_POLL_MS, self._refresh_drives)
 
     def _on_drive_selected(self, _event=None):
         idx = self.source_combo.current()
@@ -627,9 +635,19 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:  # noqa: BLE001
             pass
+    from .crashlog import start_trace, startup_done
+
+    start_trace("Baue Fenster auf")
     app = DvtImporterApp()
     app.report_callback_exception = _report_callback_exception
+    start_trace("Fenster aufgebaut")
     app.lift()
+
+    def running():
+        start_trace("Ereignisschleife läuft - Start abgeschlossen")
+        startup_done()
+
+    app.after(200, running)
     app.mainloop()
 
 
