@@ -44,12 +44,30 @@ jobs:
         run: |
           $p = Start-Process -FilePath "dist\DVT-Sidexis-Importer.exe" -ArgumentList "--selftest" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Code $($p.ExitCode))" }
+          $g = Start-Process -FilePath "dist\DVT-Sidexis-Importer.exe" -ArgumentList "--guitest" -Wait -PassThru
+          if ($g.ExitCode -ne 0) { Get-Content "$HOME\DVT-Sidexis-Importer-Fehler.txt" -ErrorAction SilentlyContinue; throw "Oberflächentest fehlgeschlagen (Code $($g.ExitCode))" }
           Compress-Archive -Path "dist\DVT-Sidexis-Importer.exe" -DestinationPath "${{ matrix.artifact }}.zip"
       - name: Selbsttest der fertigen Anwendung (macOS)
         if: runner.os == 'macOS'
         run: |
           dist/DVT-Sidexis-Importer.app/Contents/MacOS/DVT-Sidexis-Importer --selftest
+          dist/DVT-Sidexis-Importer.app/Contents/MacOS/DVT-Sidexis-Importer --guitest
+          # Dasselbe mit der Fenstergröße eines kleinen MacBook-Bildschirms.
+          DVT_TEST_SCREEN=1280x800 dist/DVT-Sidexis-Importer.app/Contents/MacOS/DVT-Sidexis-Importer --guitest
+          # Start wie per Doppelklick im Finder: Die App muss nach 8 Sekunden noch laufen.
+          open dist/DVT-Sidexis-Importer.app
+          sleep 8
+          pgrep -f "DVT-Sidexis-Importer.app/Contents/MacOS" || { cat ~/DVT-Sidexis-Importer-Fehler.txt 2>/dev/null; echo "App läuft nach Doppelklick-Start nicht"; exit 1; }
+          screencapture -x start.png || true
+          pkill -f "DVT-Sidexis-Importer.app/Contents/MacOS" || true
+          codesign --verify --deep --strict dist/DVT-Sidexis-Importer.app
           ditto -c -k --keepParent dist/DVT-Sidexis-Importer.app "${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: macOS-Startbild
+          path: start.png
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

@@ -59,6 +59,17 @@ def parse_date(text: str) -> str:
     return text
 
 
+def screen_size(widget) -> tuple:
+    """Bildschirmgröße; für Tests über DVT_TEST_SCREEN=BREITExHÖHE übersteuerbar."""
+    import os
+
+    override = os.environ.get("DVT_TEST_SCREEN", "")
+    if re.fullmatch(r"\d+x\d+", override):
+        w, h = override.split("x")
+        return int(w), int(h)
+    return widget.winfo_screenwidth(), widget.winfo_screenheight()
+
+
 def default_output_base() -> Path:
     docs = Path.home() / "Documents"
     return (docs if docs.is_dir() else Path.home()) / "DVT-Sidexis-Import"
@@ -74,8 +85,12 @@ class DvtImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"DVT-Sidexis-Importer {__version__}")
-        self.geometry("1100x820")
-        self.minsize(940, 640)
+        # Fenster an den Bildschirm anpassen (kleine Notebook-Bildschirme!) und zentrieren.
+        screen_w, screen_h = screen_size(self)
+        self._compact = screen_h < 900          # kleine Notebook-Bildschirme: Protokoll verkleinern
+        width, height = min(1100, screen_w - 40), min(860, screen_h - 110)
+        self.geometry(f"{width}x{height}+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 3)}")
+        self.minsize(min(940, width), min(600, height))
 
         self.source_dir: Path | None = None
         self.output_base: Path = default_output_base()
@@ -146,13 +161,12 @@ class DvtImporterApp(tk.Tk):
         # ---------------------------------------------------- 2 Aufnahmen
         f2 = ttk.LabelFrame(outer, text="2  Gefundene Aufnahmen prüfen und Patientendaten einstellen",
                             style="Step.TLabelframe", padding=8)
-        f2.pack(fill="both", expand=True, pady=(10, 0))
         f2.columnconfigure(0, weight=3)
         f2.columnconfigure(2, weight=2)
         f2.rowconfigure(0, weight=1)
 
         columns = ("check", "patient", "type", "size", "missing")
-        self.tree = ttk.Treeview(f2, columns=columns, show="headings", selectmode="browse", height=7)
+        self.tree = ttk.Treeview(f2, columns=columns, show="headings", selectmode="browse", height=3)
         for col, text, width, anchor, stretch in (
             ("check", "", 34, "center", False),
             ("patient", "Patient", 210, "w", True),
@@ -173,7 +187,7 @@ class DvtImporterApp(tk.Tk):
                                       state="disabled")
         self.preview_btn.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
-        self.notes_text = tk.Text(f2, height=5, wrap="word", state="disabled", relief="flat",
+        self.notes_text = tk.Text(f2, height=4, wrap="word", state="disabled", relief="flat",
                                   background=self.cget("background"), font=("", 10))
         self.notes_text.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
@@ -212,7 +226,6 @@ class DvtImporterApp(tk.Tk):
 
         # ---------------------------------------------------- 3 Ausgabe
         f3 = ttk.LabelFrame(outer, text="3  Für Sidexis aufbereiten", style="Step.TLabelframe", padding=8)
-        f3.pack(fill="x", pady=(10, 0))
         row = ttk.Frame(f3)
         row.pack(fill="x")
         ttk.Label(row, text="Speicherort:").pack(side="left")
@@ -233,16 +246,22 @@ class DvtImporterApp(tk.Tk):
 
         # ---------------------------------------------------- Fortschritt
         self.progress = ttk.Progressbar(outer, mode="determinate")
-        self.progress.pack(fill="x", pady=(10, 4))
         self.status_var = tk.StringVar(value="Bereit. Bitte USB-Stick einstecken oder Ordner wählen.")
-        ttk.Label(outer, textvariable=self.status_var).pack(anchor="w")
+        status = ttk.Label(outer, textvariable=self.status_var)
         log_frame = ttk.Frame(outer)
-        log_frame.pack(fill="x", pady=(4, 0))
-        self.log_text = tk.Text(log_frame, height=6, state="disabled", wrap="word", font=("", 9))
+        self.log_text = tk.Text(log_frame, height=2 if self._compact else 5, state="disabled", wrap="word", font=("", 9))
         self.log_text.pack(side="left", fill="x", expand=True)
         lsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         lsb.pack(side="left", fill="y")
         self.log_text.configure(yscrollcommand=lsb.set)
+
+        # Reihenfolge beim Platzieren: erst alles, was immer sichtbar bleiben muss (von unten nach
+        # oben), zuletzt die Liste - nur sie schrumpft, wenn das Fenster klein ist.
+        log_frame.pack(side="bottom", fill="x", pady=(4, 0))
+        status.pack(side="bottom", anchor="w", fill="x")
+        self.progress.pack(side="bottom", fill="x", pady=(10, 4))
+        f3.pack(side="bottom", fill="x", pady=(10, 0))
+        f2.pack(side="top", fill="both", expand=True, pady=(10, 0))
 
     # ============================================================ Datenträger
     def _refresh_drives(self):
@@ -609,7 +628,23 @@ def main():
         except Exception:  # noqa: BLE001
             pass
     app = DvtImporterApp()
+    app.report_callback_exception = _report_callback_exception
+    app.lift()
     app.mainloop()
+
+
+def _report_callback_exception(exc_type, exc, tb):
+    """Fehler in der Oberfläche nicht verschlucken, sondern protokollieren und anzeigen."""
+    import traceback
+
+    from .crashlog import write_crash_log
+
+    path = write_crash_log("".join(traceback.format_exception(exc_type, exc, tb)))
+    try:
+        messagebox.showerror("Unerwarteter Fehler",
+                             f"Es ist ein Fehler aufgetreten:\n{exc}\n\nDetails wurden gespeichert in:\n{path}")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":

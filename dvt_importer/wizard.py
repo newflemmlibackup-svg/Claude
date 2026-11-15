@@ -31,8 +31,12 @@ class WizardWindow(tk.Toplevel):
 
         self._format_date, self._parse_date, self._folder_name = format_date, parse_date, output_folder_name
         self.title(MODE_NAME)
-        self.geometry("980x700")
-        self.minsize(900, 640)
+        from .gui import screen_size
+
+        screen_w, screen_h = screen_size(self)
+        width, height = min(980, screen_w - 40), min(700, screen_h - 110)
+        self.geometry(f"{width}x{height}+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 3)}")
+        self.minsize(min(900, width), min(600, height))
 
         self.default_base = Path(output_base)
         self.output_base = Path(output_base)
