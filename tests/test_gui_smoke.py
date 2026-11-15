@@ -70,3 +70,74 @@ def test_gui_full_flow(tmp_path, monkeypatch):
         assert {str(d.PatientName) for d in instances} == {"Müller^Erika"}
     finally:
         app.destroy()
+
+
+def test_preview_rendering():
+    import numpy as np
+
+    from dvt_importer.preview import to_pgm
+
+    data = np.arange(64 * 32, dtype=np.int64).reshape(64, 32)
+    pgm = to_pgm(data, 0, 2047, 128)
+    header, pixels = pgm.split(b"\n", 1)
+    assert header == b"P5 64 128 255" and len(pixels) == 64 * 128
+    assert pixels[0] == 0 and pixels[-1] == 255
+
+
+def test_wizard_full_flow(tmp_path, monkeypatch):
+    try:
+        from dvt_importer.gui import DvtImporterApp
+        app = DvtImporterApp()
+    except tk.TclError:
+        pytest.skip("Tk kann kein Fenster öffnen")
+    from dvt_importer import wizard as wiz_mod
+
+    make_export(tmp_path / "usb", [1, 2, 3, 5, 6, 7, 8])   # Schicht 4 fehlt
+    monkeypatch.setattr(wiz_mod, "list_removable_drives", lambda: [])
+    wiz = wiz_mod.WizardWindow(app, tmp_path / "ziel")
+
+    def drain():
+        while not wiz._queue.empty():
+            wiz._handle(*wiz._queue.get_nowait())
+        app.update()
+
+    try:
+        assert str(wiz.next_btn.cget("state")) == "disabled"     # ohne Auswahl kein „Weiter“
+        wiz.custom_folder = tmp_path / "usb"
+        wiz.source_var.set(str(tmp_path / "usb"))
+        wiz._shown_drives = None
+        wiz._refresh_drives()
+        assert str(wiz.next_btn.cget("state")) == "normal"
+
+        wiz._scan_worker(wiz.source)
+        drain()
+        assert len(wiz.volumes) == 1 and wiz.preview is not None
+        assert wiz.preview._slots[3] is None                     # Lücke in der Vorschau
+        wiz.preview.show(3)
+        assert "fehlt" in wiz.preview.info_var.get()
+        wiz.preview.show(0)
+        assert wiz.preview._photo is not None
+
+        wiz._show_patient()
+        wiz.patient_vars["last_name"].set("")
+        wiz._patient_next()
+        assert wiz.step == 2                                     # bleibt auf der Seite
+        wiz.patient_vars["last_name"].set("Müller")
+        wiz.patient_vars["birth_date"].set("unsinn")
+        wiz._patient_next()
+        assert wiz.step == 2
+        wiz.patient_vars["birth_date"].set("24.12.1985")
+        wiz._patient_next()
+        assert wiz.step == 3
+
+        wiz._show_summary()
+        out = tmp_path / "ziel" / "test"
+        wiz._convert_worker(wiz._selected(), out)
+        drain()
+        assert wiz.result is not None and wiz.result.verified and wiz.result.black_missing == 1
+        assert wiz.path_var.get() == str(out)
+        names = {str(pydicom.dcmread(i.path).PatientName) for i in FileSet(str(out / "DICOMDIR"))}
+        assert names == {"Müller^Erika"}
+    finally:
+        wiz.destroy()
+        app.destroy()

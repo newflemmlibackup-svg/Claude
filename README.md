@@ -25,6 +25,24 @@ Sidexis-PC gebracht.)
 
 Der Original-Datenträger wird nur gelesen und nie verändert.
 
+### „Felix ist nicht da“-Modus
+
+Oben rechts im Fenster sitzt ein auffälliger oranger Knopf. Er öffnet eine
+Schritt-für-Schritt-Führung für alle, die das Programm selten benutzen: pro
+Seite nur eine einfache Frage, große Schrift, keine Fachbegriffe.
+
+1. Wo ist die fremde Aufnahme? (Stick anklicken oder Ordner wählen)
+2. Aufnahme ansehen – mit Vorschau und Klartext-Hinweis, falls Schichten fehlen
+3. Für welchen Patienten? (Nachname, Vorname, Geburtsdatum)
+4. Wo speichern? (der übliche Ordner ist vorausgewählt)
+5. Kontrolle, Fertigstellen und Anleitung für den Import in Sidexis
+
+### Vorschau
+
+Über *Vorschau anzeigen …* (und im geführten Modus automatisch) lässt sich mit
+einem Regler oder dem Mausrad durch die Schichten blättern. Fehlende oder
+unlesbare Schichten sind dabei deutlich als solche markiert.
+
 ## Was das Programm repariert
 
 Jede Schicht wird **komplett neu aufgebaut** – aus den Fremddaten werden nur
@@ -128,6 +146,8 @@ dvt_importer/
   converter.py  Baut die Schichten neu auf, schreibt Medium + DICOMDIR, Abschlussprüfung
   drives.py     Erkennung von USB-Sticks/CDs (Windows, macOS, Linux)
   gui.py        Bedienoberfläche
+  wizard.py     Geführter „Felix ist nicht da“-Modus
+  preview.py    Vorschau-Betrachter
   selftest.py   Selbsttest der fertig gebauten Anwendung
 build/          Build-Skripte (PyInstaller)
 tests/          Automatische Tests mit künstlich beschädigten DVT-Daten

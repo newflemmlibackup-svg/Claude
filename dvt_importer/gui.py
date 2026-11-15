@@ -74,7 +74,7 @@ class DvtImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"DVT-Sidexis-Importer {__version__}")
-        self.geometry("1100x760")
+        self.geometry("1100x820")
         self.minsize(940, 640)
 
         self.source_dir: Path | None = None
@@ -88,6 +88,7 @@ class DvtImporterApp(tk.Tk):
         self._busy = False
         self._cancel = threading.Event()
         self._queue: "queue.Queue" = queue.Queue()
+        self._wizard_open = False
         self._drives: list = []
         self._known_drive_paths: set | None = None
 
@@ -110,6 +111,20 @@ class DvtImporterApp(tk.Tk):
 
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill="both", expand=True)
+
+        # ---------------------------------------------------- Kopfzeile
+        head = ttk.Frame(outer)
+        head.pack(fill="x", pady=(0, 8))
+        ttk.Label(head, text="DVT-Sidexis-Importer", font=("", 15, "bold")).pack(side="left")
+        # Bewusst ein tk.Label statt Button: nur so bleibt die Signalfarbe auch unter macOS erhalten.
+        self.wizard_btn = tk.Label(head, text="★  Felix ist nicht da-Modus  ›", background="#e8590c",
+                                   foreground="white", font=("", 13, "bold"), padx=18, pady=9,
+                                   cursor="hand2")
+        self.wizard_btn.pack(side="right")
+        self.wizard_btn.bind("<Button-1>", lambda _e: self._open_wizard())
+        self.wizard_btn.bind("<Enter>", lambda _e: self.wizard_btn.config(background="#d9480f"))
+        self.wizard_btn.bind("<Leave>", lambda _e: self.wizard_btn.config(background="#e8590c"))
+        ttk.Label(head, text="Schritt-für-Schritt-Hilfe:", style="Hint.TLabel").pack(side="right", padx=8)
 
         # ---------------------------------------------------- 1 Quelle
         f1 = ttk.LabelFrame(outer, text="1  Fremde Aufnahme (USB-Stick, CD oder Ordner)",
@@ -154,12 +169,16 @@ class DvtImporterApp(tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
 
+        self.preview_btn = ttk.Button(f2, text="Vorschau anzeigen …", command=self._open_preview,
+                                      state="disabled")
+        self.preview_btn.grid(row=2, column=0, sticky="w", pady=(6, 0))
+
         self.notes_text = tk.Text(f2, height=5, wrap="word", state="disabled", relief="flat",
                                   background=self.cget("background"), font=("", 10))
         self.notes_text.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         form = ttk.Frame(f2, padding=(14, 0, 0, 0))
-        form.grid(row=0, column=2, rowspan=2, sticky="nsew")
+        form.grid(row=0, column=2, rowspan=3, sticky="nsew")
         form.columnconfigure(1, weight=1)
         ttk.Label(form, text="Patientendaten für Sidexis", font=("", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -235,7 +254,7 @@ class DvtImporterApp(tk.Tk):
         if [d.path for d in drives] != [d.path for d in self._drives]:
             self._drives = drives
             self.source_combo.configure(values=[d.display for d in drives])
-        if not self._busy:
+        if not self._busy and not self._wizard_open:
             if new:
                 self._set_source(Path(new[0].path), new[0].display)
                 if self.auto_var.get():
@@ -373,6 +392,7 @@ class DvtImporterApp(tk.Tk):
             widget.config(state=("readonly" if isinstance(widget, ttk.Combobox) else "normal")
                           if series is not None else "disabled")
         self.apply_all_btn.config(state=state if len(self.row_to_series) > 1 else "disabled")
+        self.preview_btn.config(state=state)
         p = series.patient if series is not None else None
         for name, var in self.form_vars.items():
             value = getattr(p, name) if p is not None else ""
@@ -420,6 +440,22 @@ class DvtImporterApp(tk.Tk):
                 setattr(series.patient, name, getattr(src, name))
             self.tree.set(row, "patient", series.patient.display_name)
         self._log("Patientendaten für alle Aufnahmen übernommen.")
+
+    def _open_preview(self):
+        if self.current_series is not None:
+            from .preview import open_preview_window
+
+            open_preview_window(self, self.current_series)
+
+    def _open_wizard(self):
+        if self._busy:
+            messagebox.showinfo("Bitte warten", "Es läuft gerade noch ein Vorgang.")
+            return
+        from .wizard import WizardWindow
+
+        self._wizard_open = True
+        wizard = WizardWindow(self, self.output_base)
+        wizard.bind("<Destroy>", lambda e: setattr(self, "_wizard_open", False) if e.widget is wizard else None)
 
     # ============================================================= Aufbereiten
     def _choose_dest(self):
