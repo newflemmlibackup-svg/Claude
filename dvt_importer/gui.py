@@ -232,9 +232,14 @@ class DvtImporterApp(tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
 
-        self.preview_btn = ttk.Button(f2, text="Vorschau anzeigen …", command=self._open_preview,
+        view_row = ttk.Frame(f2)
+        view_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.preview_btn = ttk.Button(view_row, text="Vorschau anzeigen …", command=self._open_preview,
                                       state="disabled")
-        self.preview_btn.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.preview_btn.pack(side="left")
+        self.viewer_btn = ttk.Button(view_row, text="Im Notfall-Viewer öffnen …", command=self._open_viewer,
+                                     state="disabled")
+        self.viewer_btn.pack(side="left", padx=(8, 0))
 
         self.notes_text = tk.Text(f2, height=4, wrap="word", state="disabled", relief="flat",
                                   background=self.cget("background"), font=("", 10))
@@ -467,6 +472,7 @@ class DvtImporterApp(tk.Tk):
                           if series is not None else "disabled")
         self.apply_all_btn.config(state=state if len(self.row_to_series) > 1 else "disabled")
         self.preview_btn.config(state=state)
+        self.viewer_btn.config(state="normal" if series is not None and series.kind == KIND_VOLUME else "disabled")
         p = series.patient if series is not None else None
         for name, var in self.form_vars.items():
             value = getattr(p, name) if p is not None else ""
@@ -520,6 +526,12 @@ class DvtImporterApp(tk.Tk):
             from .preview import open_preview_window
 
             open_preview_window(self, self.current_series)
+
+    def _open_viewer(self):
+        if self.current_series is not None:
+            from .viewer import open_viewer
+
+            open_viewer(self, series=self.current_series)
 
     def _open_wizard(self):
         if self._busy:

@@ -57,6 +57,33 @@ Seite nur eine einfache Frage, große Schrift, keine Fachbegriffe.
 einem Regler oder dem Mausrad durch die Schichten blättern. Fehlende oder
 unlesbare Schichten sind dabei deutlich als solche markiert.
 
+## Notfall-Viewer
+
+Für den Fall, dass eine Aufnahme hier gelesen werden kann, Sidexis sie aber
+(noch) nicht annimmt: Über **Im Notfall-Viewer öffnen …** (Hauptfenster),
+**Groß ansehen** (geführter Modus, Schritt 2) oder **Aufnahme im
+Notfall-Viewer ansehen** (letzter Schritt) öffnet sich eine Betrachtung im
+Stil der üblichen Dental-Software:
+
+- **Vier Ansichten:** axial, koronal, sagittal (farbig gekoppeltes
+  Fadenkreuz) und wahlweise **3D** oder **Panorama**.
+- **Blättern** mit Mausrad, Schieberegler oder Pfeiltasten; Doppelklick
+  vergrößert eine Ansicht.
+- **Werkzeuge:** Fadenkreuz, Verschieben, Zoom, Helligkeit/Kontrast (auch
+  jederzeit mit der rechten Maustaste, am Mac Ctrl + Klick), Strecke (mm),
+  Winkel (°), Panoramakurve.
+- **Darstellung:** Voreinstellungen (Knochen/Zähne, Weichgewebe …) und
+  Schichtdicke (1–10 mm gemittelt).
+- **Panorama:** Mit dem Werkzeug „Panoramakurve“ in der axialen Ansicht
+  entlang des Zahnbogens klicken, Doppelklick beendet. Im Panorama verschiebt
+  das Mausrad die Schicht nach innen/außen.
+- **3D:** Oberfläche (Knochen/Zähne, Schwelle einstellbar) oder
+  Röntgen-Durchleuchtung; mit der Maus drehen, Mausrad zoomt.
+
+Der Viewer ist ein Notbehelf zum Ansehen und **kein zertifiziertes
+Diagnoseprogramm**. Er braucht etwa so viel Arbeitsspeicher wie die Aufnahme
+groß ist (typisch 100–400 MB).
+
 ## Was das Programm repariert
 
 Jede Schicht wird **komplett neu aufgebaut** – aus den Fremddaten werden nur
@@ -162,6 +189,7 @@ dvt_importer/
   gui.py        Bedienoberfläche
   wizard.py     Geführter „Felix ist nicht da“-Modus
   preview.py    Vorschau-Betrachter
+  viewer.py     Notfall-Viewer (MPR, Panorama, 3D, Messen)
   selftest.py   Selbsttest der fertig gebauten Anwendung
 build/          Build-Skripte (PyInstaller)
 tests/          Automatische Tests mit künstlich beschädigten DVT-Daten

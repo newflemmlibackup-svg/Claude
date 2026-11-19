@@ -423,8 +423,12 @@ class WizardWindow(tk.Toplevel):
         c.rowconfigure(0, weight=1)
         left = ttk.Frame(c)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 24))
-        self.preview = PreviewPanel(c, size=340)
-        self.preview.grid(row=0, column=1, sticky="n")
+        right = ttk.Frame(c)
+        right.grid(row=0, column=1, sticky="n")
+        self.preview = PreviewPanel(right, size=340)
+        self.preview.pack()
+        ttk.Button(right, text="Groß ansehen (Notfall-Viewer) …", style="Wiz.TButton",
+                   command=self._open_viewer_selected).pack(fill="x", pady=(8, 0))
 
         if many:
             ttk.Label(left, style="WizHint.TLabel", wraplength=470, justify="left",
@@ -667,7 +671,11 @@ class WizardWindow(tk.Toplevel):
             ttk.Label(c, style="WizHint.TLabel", wraplength=880, justify="left",
                       text="Sidexis läuft nur unter Windows: Den Ordner per USB-Stick oder Netzlaufwerk zum "
                            "Sidexis-PC bringen und dort auf den Desktop legen.").pack(anchor="w", pady=(8, 0))
-        ttk.Button(c, text="Hat nicht geklappt?", command=self._show_import_help).pack(anchor="w", pady=(10, 0))
+        help_row = ttk.Frame(c)
+        help_row.pack(anchor="w", pady=(10, 0))
+        ttk.Button(help_row, text="Hat nicht geklappt?", command=self._show_import_help).pack(side="left")
+        ttk.Button(help_row, text="Aufnahme im Notfall-Viewer ansehen …",
+                   command=lambda: self._open_viewer_folder(folder)).pack(side="left", padx=(8, 0))
         self._nav(back=self._restart, nxt=self._finish_ok, next_text="✓  Hat geklappt – fertig")
         self.back_btn.config(text="Noch eine Aufnahme")
 
@@ -684,7 +692,20 @@ class WizardWindow(tk.Toplevel):
             "• Die Aufnahme landet beim falschen Patienten:\n"
             "   Nicht weiterarbeiten und Felix Bescheid geben.\n\n"
             "• Sonst: Den Ordner auf dem Desktop liegen lassen, den USB-Stick aufbewahren "
-            "und Felix Bescheid geben – mit dem Wortlaut der Fehlermeldung von Sidexis."), parent=self)
+            "und Felix Bescheid geben – mit dem Wortlaut der Fehlermeldung von Sidexis.\n\n"
+            "Bis dahin kann der Behandler die Aufnahme im Notfall-Viewer ansehen "
+            "(Knopf „Aufnahme im Notfall-Viewer ansehen“)."), parent=self)
+
+    def _open_viewer_selected(self):
+        from .viewer import open_viewer
+
+        if self.cards.selected_series is not None:
+            open_viewer(self, series=self.cards.selected_series)
+
+    def _open_viewer_folder(self, folder):
+        from .viewer import open_viewer
+
+        open_viewer(self, folder=Path(folder))
 
     def _copy_path(self):
         self.clipboard_clear()

@@ -77,13 +77,29 @@ def run() -> int:
                         errors.append(f"Hauptfenster {app.geometry()}: „{name}“ liegt außerhalb des Fensters")
 
             def step4():
+                from .viewer import open_viewer
+
                 state["wiz"]._close()
+                state["viewer"] = open_viewer(app, series=app.current_series)
+
+            def step5():
+                v = state["viewer"]
+                if v.data is None:
+                    errors.append("Notfall-Viewer: Aufnahme wurde nicht geladen")
+                else:
+                    v.panel3d.render()
+                    if v.panel3d._photo is None:
+                        errors.append("Notfall-Viewer: 3D-Ansicht leer")
+                v.close()
+
+            def step6():
                 state["ok"] = app.winfo_viewable() == 1 and app.winfo_height() > 300
                 app.destroy()
 
-            for delay, func in ((700, step1), (1500, step2), (2300, step3), (3000, step4)):
+            for delay, func in ((700, step1), (1500, step2), (2300, step3), (3000, step4), (6000, step5),
+                                (6800, step6)):
                 app.after(delay, func)
-            app.after(15000, app.destroy)   # Notbremse
+            app.after(25000, app.destroy)   # Notbremse
             app.mainloop()
             if not state.get("ok"):
                 errors.append("Hauptfenster wurde nicht sichtbar oder Ablauf unvollständig")
