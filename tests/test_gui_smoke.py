@@ -141,3 +141,47 @@ def test_wizard_full_flow(tmp_path, monkeypatch):
     finally:
         wiz.destroy()
         app.destroy()
+
+
+def test_wizard_card_selection_drives_preview(tmp_path, monkeypatch):
+    try:
+        from dvt_importer.gui import DvtImporterApp
+        app = DvtImporterApp()
+    except tk.TclError:
+        pytest.skip("Tk kann kein Fenster öffnen")
+    from dvt_importer import wizard as wiz_mod
+    from dvt_importer.scanner import scan_source
+
+    monkeypatch.setattr(wiz_mod, "list_removable_drives", lambda: [])
+    for name, count in (("A", 9), ("B", 7), ("C", 6)):
+        make_export(tmp_path / "usb" / name, range(1, count + 1), patient_id=name)
+    wiz = wiz_mod.WizardWindow(app, tmp_path / "ziel")
+    try:
+        wiz.source, wiz.source_label = tmp_path / "usb", "USB"
+        wiz._on_scanned(scan_source(tmp_path / "usb"))
+        app.update()
+        assert len(wiz.volumes) == 3
+        assert wiz.preview._series is wiz.volumes[0]           # erste Aufnahme vorausgewählt
+
+        # Klick irgendwo auf die zweite Karte -> rechts erscheint diese Aufnahme
+        wiz.cards.cards[1]["widgets"][-1].event_generate("<Button-1>", x=5, y=5)
+        app.update()
+        assert wiz.cards.index == 1 and wiz.preview._series is wiz.volumes[1]
+
+        # Häkchen der dritten Karte abwählen: wird nicht übernommen, Auswahl springt mit
+        wiz.cards.cards[2]["box"].event_generate("<Button-1>", x=10, y=10)
+        app.update()
+        assert wiz._selected() == wiz.volumes[:2]
+        assert wiz.preview._series is wiz.volumes[2]
+
+        # Pfeiltasten wechseln ebenfalls die Vorschau
+        wiz.cards.move(-1)
+        assert wiz.preview._series is wiz.volumes[1]
+
+        # Alle abgewählt -> kein "Weiter"
+        for i in (0, 1):
+            wiz.cards._toggle(i)
+        assert str(wiz.next_btn.cget("state")) == "disabled"
+    finally:
+        wiz.destroy()
+        app.destroy()

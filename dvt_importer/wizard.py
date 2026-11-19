@@ -25,6 +25,181 @@ class _Cancelled(Exception):
     pass
 
 
+class SeriesCardList(ttk.Frame):
+    """Liste anklickbarer Karten, eine pro Aufnahme.
+
+    Ein Klick auf die Karte wählt sie aus (farbig hervorgehoben, Vorschau rechts).
+    Das Kästchen links legt fest, ob die Aufnahme übernommen wird. Bei vielen
+    Aufnahmen wird die Liste scrollbar.
+    """
+
+    BG = "#ffffff"
+    BG_HOVER = "#f4f5f7"
+    BG_SELECTED = "#fff4e6"
+    BORDER = "#d0d4da"
+    TEXT = "#1f2328"
+    SUBTEXT = "#5c636a"
+    OK = "#2b8a3e"
+    WARN = "#c92a2a"
+    MAX_VISIBLE = 3
+
+    def __init__(self, parent, series_list, checked: dict, *, with_checkbox: bool, on_select, on_toggle):
+        super().__init__(parent)
+        self.series_list = series_list
+        self.checked = checked
+        self.with_checkbox = with_checkbox
+        self.on_select = on_select
+        self.on_toggle = on_toggle
+        self.index = -1
+        self.cards: list = []
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0,
+                                background=ttk.Style(self).lookup("TFrame", "background") or self.BG)
+        self.inner = tk.Frame(self.canvas, background=self.canvas.cget("background"))
+        self._window = self.canvas.create_window(0, 0, anchor="nw", window=self.inner)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner.bind("<Configure>", self._on_inner_resize)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
+
+        for i, series in enumerate(series_list):
+            self.cards.append(self._make_card(i, series))
+
+    # ----------------------------------------------------------- Aufbau
+    def _make_card(self, index: int, series) -> dict:
+        from .gui import format_date
+
+        card = tk.Frame(self.inner, background=self.BG, highlightthickness=2,
+                        highlightbackground=self.BORDER, highlightcolor=self.BORDER, cursor="hand2")
+        card.pack(fill="x", pady=(0, 6), padx=(0, 4))
+        widgets = [card]
+
+        box = None
+        if self.with_checkbox:
+            box = tk.Canvas(card, width=26, height=26, highlightthickness=0, background=self.BG, cursor="hand2")
+            box.pack(side="left", padx=(12, 4), pady=8)
+            box.bind("<Button-1>", lambda _e, i=index: self._toggle(i))
+            widgets.append(box)
+
+        text = tk.Frame(card, background=self.BG)
+        text.pack(side="left", fill="x", expand=True, padx=(12 if box is None else 6, 12), pady=7)
+        widgets.append(text)
+        title = tk.Label(text, text=series.patient.display_name, background=self.BG, foreground=self.TEXT,
+                         font=("", 14, "bold"), anchor="w")
+        title.pack(fill="x")
+        date = format_date(series.patient.study_date)
+        details = "  ·  ".join(x for x in (
+            f"Aufnahme vom {date}" if date else "",
+            f"{series.num_output} Schichten",
+            " ".join(x for x in (series.manufacturer, series.model) if x),
+        ) if x)
+        sub = tk.Label(text, text=details, background=self.BG, foreground=self.SUBTEXT, font=("", 11), anchor="w")
+        sub.pack(fill="x")
+        if series.num_missing:
+            status_text, status_color = f"⚠  {series.num_missing} Schicht(en) fehlen – werden schwarz ergänzt", self.WARN
+        else:
+            status_text, status_color = "✓  vollständig", self.OK
+        status = tk.Label(text, text=status_text, background=self.BG, foreground=status_color,
+                          font=("", 11, "bold"), anchor="w")
+        status.pack(fill="x", pady=(2, 0))
+        widgets += [title, sub, status]
+
+        for w in widgets:
+            if w is not box:
+                w.bind("<Button-1>", lambda _e, i=index: self.select(i))
+            w.bind("<Enter>", lambda _e, i=index: self._hover(i, True))
+            w.bind("<Leave>", lambda _e, i=index: self._hover(i, False))
+            w.bind("<MouseWheel>", self._on_wheel)
+            w.bind("<Button-4>", lambda _e: self.canvas.yview_scroll(-1, "units"))
+            w.bind("<Button-5>", lambda _e: self.canvas.yview_scroll(1, "units"))
+        entry = {"frame": card, "box": box, "widgets": widgets, "hover": False}
+        self._draw_box(entry, self.checked[series.key].get())
+        return entry
+
+    def _on_inner_resize(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        cards = [c["frame"] for c in self.cards]
+        if not cards:
+            return
+        visible = cards[: self.MAX_VISIBLE]
+        height = sum(c.winfo_reqheight() + 6 for c in visible)
+        self.canvas.configure(height=height)
+        needs_scroll = len(cards) > self.MAX_VISIBLE
+        if needs_scroll and not self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack(side="right", fill="y")
+        elif not needs_scroll and self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack_forget()
+
+    # ------------------------------------------------------- Verhalten
+    def select(self, index: int) -> None:
+        if not 0 <= index < len(self.cards):
+            return
+        changed = index != self.index
+        self.index = index
+        for i in range(len(self.cards)):
+            self._paint(i)
+        self._scroll_into_view(index)
+        if changed:
+            self.on_select(self.series_list[index])
+
+    def move(self, delta: int) -> None:
+        self.select(min(max(self.index + delta, 0), len(self.cards) - 1))
+
+    @property
+    def selected_series(self):
+        return self.series_list[self.index] if self.index >= 0 else None
+
+    def _toggle(self, index: int) -> None:
+        var = self.checked[self.series_list[index].key]
+        var.set(not var.get())
+        self._draw_box(self.cards[index], var.get())
+        self.on_toggle()
+        self.select(index)
+
+    def _hover(self, index: int, inside: bool) -> None:
+        self.cards[index]["hover"] = inside
+        self._paint(index)
+
+    def _paint(self, index: int) -> None:
+        entry = self.cards[index]
+        selected = index == self.index
+        bg = self.BG_SELECTED if selected else (self.BG_HOVER if entry["hover"] else self.BG)
+        border = ACCENT if selected else self.BORDER
+        entry["frame"].configure(highlightbackground=border, highlightcolor=border)
+        for w in entry["widgets"]:
+            w.configure(background=bg)
+
+    def _draw_box(self, entry: dict, on: bool) -> None:
+        box = entry["box"]
+        if box is None:
+            return
+        box.delete("all")
+        if on:
+            box.create_rectangle(3, 3, 23, 23, fill=ACCENT, outline=ACCENT, width=2)
+            box.create_line(7, 13, 11, 18, 19, 8, fill="white", width=3, capstyle="round", joinstyle="round")
+        else:
+            box.create_rectangle(3, 3, 23, 23, fill="white", outline="#8a9099", width=2)
+
+    def _scroll_into_view(self, index: int) -> None:
+        if not self.scrollbar.winfo_ismapped():
+            return
+        self.update_idletasks()
+        frame = self.cards[index]["frame"]
+        total = max(self.inner.winfo_height(), 1)
+        top, bottom = frame.winfo_y(), frame.winfo_y() + frame.winfo_height()
+        view_top, view_bottom = (f * total for f in self.canvas.yview())
+        if top < view_top:
+            self.canvas.yview_moveto(top / total)
+        elif bottom > view_bottom:
+            self.canvas.yview_moveto((bottom - (view_bottom - view_top)) / total)
+
+    def _on_wheel(self, event):
+        if self.scrollbar.winfo_ismapped():
+            step = -1 if event.delta > 0 else 1
+            self.canvas.yview_scroll(step, "units")
+
+
 class WizardWindow(tk.Toplevel):
     def __init__(self, parent, output_base: Path):
         super().__init__(parent)
@@ -103,6 +278,8 @@ class WizardWindow(tk.Toplevel):
             self.after_cancel(self._drive_job)
             self._drive_job = None
         self.preview = None
+        self.unbind("<Up>")
+        self.unbind("<Down>")
         for child in self.body.winfo_children():
             child.destroy()
         self.step = step
@@ -236,36 +413,33 @@ class WizardWindow(tk.Toplevel):
 
         many = len(self.volumes) > 1
         c = self._page(1, "Es wurden mehrere Aufnahmen gefunden" if many else "Die Aufnahme wurde gefunden",
+                       "Klicken Sie links eine Aufnahme an – rechts erscheint die Vorschau. Bewegen Sie den "
+                       "Regler unter dem Bild: Wenn Zähne und Kiefer zu erkennen sind, ist alles in Ordnung."
+                       if many else
                        "Rechts sehen Sie eine Vorschau. Bewegen Sie den Regler unter dem Bild: "
                        "Wenn Zähne und Kiefer zu erkennen sind, ist alles in Ordnung.")
         c.columnconfigure(0, weight=1)
+        c.rowconfigure(0, weight=1)
         left = ttk.Frame(c)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 24))
         self.preview = PreviewPanel(c, size=340)
         self.preview.grid(row=0, column=1, sticky="n")
 
         if many:
-            ttk.Label(left, style="WizText.TLabel", wraplength=470, justify="left",
-                      text="Im Zweifel einfach alle Häkchen gesetzt lassen.").pack(anchor="w", pady=(0, 8))
-        self.show_var = tk.IntVar(value=0)
-        for i, series in enumerate(self.volumes):
+            ttk.Label(left, style="WizHint.TLabel", wraplength=470, justify="left",
+                      text="Aufnahmen mit Häkchen werden übernommen. Im Zweifel alle Häkchen gesetzt lassen."
+                      ).pack(anchor="w", pady=(0, 8))
+        for series in self.volumes:
             self.checked.setdefault(series.key, tk.BooleanVar(value=True))
-            row = ttk.Frame(left)
-            row.pack(fill="x", pady=4)
-            date = self._format_date(series.patient.study_date)
-            label = f"{series.patient.display_name}" + (f", vom {date}" if date else "") \
-                + f"  ({series.num_output} Schichten)"
-            if many:
-                ttk.Checkbutton(row, text=label, variable=self.checked[series.key], style="Wiz.TCheckbutton",
-                                command=self._volumes_changed).pack(side="left")
-                ttk.Radiobutton(row, text="ansehen", value=i, variable=self.show_var,
-                                command=self._preview_selected).pack(side="right")
-            else:
-                ttk.Label(row, text=label, style="WizText.TLabel").pack(side="left")
+        self.cards = SeriesCardList(left, self.volumes, self.checked, with_checkbox=many,
+                                    on_select=self._preview_selected, on_toggle=self._volumes_changed)
+        self.cards.pack(fill="x")
         self.volume_notes = ttk.Frame(left)
-        self.volume_notes.pack(fill="x", pady=(14, 0))
+        self.volume_notes.pack(fill="x", pady=(12, 0))
         self._nav(back=self._show_source, nxt=self._show_patient)
-        self._preview_selected()
+        self.bind("<Up>", lambda _e: self.cards.move(-1))
+        self.bind("<Down>", lambda _e: self.cards.move(1))
+        self.cards.select(0)
         self._volumes_changed()
 
     def _selected(self) -> list:
@@ -274,20 +448,14 @@ class WizardWindow(tk.Toplevel):
     def _volumes_changed(self):
         self.next_btn.config(state="normal" if self._selected() else "disabled")
 
-    def _preview_selected(self):
-        series = self.volumes[self.show_var.get()]
+    def _preview_selected(self, series):
         for child in self.volume_notes.winfo_children():
             child.destroy()
         if series.num_missing:
-            ttk.Label(self.volume_notes, style="WizWarn.TLabel", wraplength=470, justify="left",
-                      text=f"Hinweis: Bei dieser Aufnahme fehlen {series.num_missing} Schicht(en).").pack(anchor="w")
-            ttk.Label(self.volume_notes, style="WizText.TLabel", wraplength=470, justify="left",
-                      text="Das ist kein Hindernis: Die fehlenden Schichten werden automatisch durch "
-                           "schwarze Bilder ersetzt. Bitte dem Behandler Bescheid geben, dass an "
-                           "diesen Stellen nichts zu sehen ist.").pack(anchor="w", pady=(4, 0))
-        else:
-            ttk.Label(self.volume_notes, style="WizOk.TLabel",
-                      text="✓  Die Aufnahme ist vollständig.").pack(anchor="w")
+            ttk.Label(self.volume_notes, style="WizText.TLabel", wraplength=520, justify="left",
+                      text="Fehlende Schichten sind kein Hindernis – sie werden automatisch schwarz ergänzt. "
+                           "Bitte dem Behandler Bescheid geben, dass dort nichts zu sehen ist."
+                      ).pack(anchor="w")
         if series.plan is not None and not series.plan.spacing_known:
             ttk.Label(self.volume_notes, style="WizWarn.TLabel", wraplength=470, justify="left",
                       text="Achtung: In dieser Aufnahme fehlt die Größenangabe. Längenmessungen "
