@@ -4,6 +4,7 @@ den gesamten Ablauf - ohne Fachbegriffe, immer nur eine Entscheidung pro Seite.
 from __future__ import annotations
 
 import queue
+import sys
 import shutil
 import threading
 import tkinter as tk
@@ -203,9 +204,9 @@ class SeriesCardList(ttk.Frame):
 class WizardWindow(tk.Toplevel):
     def __init__(self, parent, output_base: Path):
         super().__init__(parent)
-        from .gui import format_date, output_folder_name, parse_date  # hier wegen Kreisimport
+        from .gui import format_date, parse_date, unique_output_dir  # hier wegen Kreisimport
 
-        self._format_date, self._parse_date, self._folder_name = format_date, parse_date, output_folder_name
+        self._format_date, self._parse_date, self._unique_dir = format_date, parse_date, unique_output_dir
         self.title(MODE_NAME)
         from .gui import screen_size
 
@@ -516,16 +517,20 @@ class WizardWindow(tk.Toplevel):
 
     # ================================================ Schritt 4: Speicherort
     def _show_destination(self):
+        patient = self._selected()[0].patient
         c = self._page(3, "Wo soll die fertige Aufnahme gespeichert werden?",
-                       "Wenn Sie unsicher sind: einfach die erste Möglichkeit ausgewählt lassen "
-                       "und auf „Weiter“ klicken.")
+                       "Am besten einfach so lassen und auf „Weiter“ klicken.")
         is_default = self.output_base == self.default_base
         self.dest_choice = tk.StringVar(value="default" if is_default else "custom")
-        ttk.Radiobutton(c, text="Im üblichen Ordner (empfohlen)", value="default", variable=self.dest_choice,
-                        style="Wiz.TRadiobutton", command=self._dest_changed).pack(anchor="w", pady=(0, 2))
-        ttk.Label(c, text=str(self.default_base), style="WizHint.TLabel").pack(anchor="w", padx=28)
+        ttk.Radiobutton(c, text="Auf dem Desktop, in einem Ordner mit dem Namen des Patienten (empfohlen)",
+                        value="default", variable=self.dest_choice, style="Wiz.TRadiobutton",
+                        command=self._dest_changed).pack(anchor="w", pady=(0, 4))
+        folder = self._unique_dir(self.default_base, patient)
+        tk.Label(c, text=folder.name, font=("", 15, "bold"), foreground=ACCENT,
+                 background=self.cget("background")).pack(anchor="w", padx=28)
+        ttk.Label(c, text=str(folder), style="WizHint.TLabel").pack(anchor="w", padx=28, pady=(2, 0))
         ttk.Radiobutton(c, text="In einem anderen Ordner", value="custom", variable=self.dest_choice,
-                        style="Wiz.TRadiobutton", command=self._dest_changed).pack(anchor="w", pady=(18, 2))
+                        style="Wiz.TRadiobutton", command=self._dest_changed).pack(anchor="w", pady=(26, 4))
         row = ttk.Frame(c)
         row.pack(anchor="w", padx=28, fill="x")
         self.custom_dest_var = tk.StringVar(value="" if is_default else str(self.output_base))
@@ -533,8 +538,8 @@ class WizardWindow(tk.Toplevel):
         self.dest_btn.pack(side="left", padx=(0, 12))
         ttk.Label(row, textvariable=self.custom_dest_var, style="WizHint.TLabel").pack(side="left")
         ttk.Label(c, style="WizHint.TLabel", wraplength=880, justify="left",
-                  text="Dort wird automatisch ein neuer Unterordner mit dem Namen des Patienten angelegt. "
-                       "Der USB-Stick selbst wird nicht verändert.").pack(anchor="w", pady=(24, 0))
+                  text="Auch dort wird ein Ordner mit dem Namen des Patienten angelegt. "
+                       "Der USB-Stick selbst wird nicht verändert.").pack(anchor="w", padx=28, pady=(8, 0))
         self._nav(back=self._show_patient, nxt=self._show_summary)
         self._dest_changed()
 
@@ -564,7 +569,7 @@ class WizardWindow(tk.Toplevel):
             ("Patient", p.display_name),
             ("Geburtsdatum", self._format_date(p.birth_date) or "(nicht angegeben)"),
             ("Aufnahmen", f"{len(selected)}  ({sum(s.num_output for s in selected)} Schichten)"),
-            ("Speicherort", str(self.output_base)),
+            ("Speicherort", str(self._unique_dir(self.output_base, p))),
         ]
         if missing:
             rows.insert(4, ("Fehlende Schichten", f"{missing} – werden schwarz ersetzt"))
@@ -577,7 +582,7 @@ class WizardWindow(tk.Toplevel):
 
     def _start_convert(self):
         selected = self._selected()
-        out_dir = self.output_base / self._folder_name(selected[0].patient)
+        out_dir = self._unique_dir(self.output_base, selected[0].patient)
         c = self._page(4, "Die Aufnahme wird vorbereitet …",
                        "Bitte warten und den USB-Stick noch nicht herausziehen.")
         self.conv_bar = ttk.Progressbar(c, mode="determinate")
@@ -611,34 +616,75 @@ class WizardWindow(tk.Toplevel):
     def _show_done(self, result):
         self.result = result
         ok = result.verified and result.series_converted > 0
-        c = self._page(4, "Geschafft! Die Aufnahme ist bereit für Sidexis." if ok
+        p = self._selected()[0].patient
+        folder = Path(result.output_dir)
+        on_desktop = folder.parent == self.default_base
+        c = self._page(4, "Geschafft! Jetzt nur noch in Sidexis importieren." if ok
                        else "Die Aufnahme wurde gespeichert – bitte Hinweise beachten")
         black = result.black_missing + result.black_damaged
         if black or result.partially_damaged:
             ttk.Label(c, style="WizWarn.TLabel", wraplength=880, justify="left",
                       text=f"Hinweis für den Behandler: {black + result.partially_damaged} Schicht(en) "
-                           "fehlten oder waren beschädigt und wurden schwarz ersetzt.").pack(anchor="w", pady=(0, 10))
+                           "fehlten oder waren beschädigt und wurden schwarz ersetzt.").pack(anchor="w", pady=(0, 6))
         for line in result.problems:
             ttk.Label(c, style="WizWarn.TLabel", wraplength=880, justify="left",
                       text=f"Hinweis: {line}").pack(anchor="w", pady=(0, 6))
-        ttk.Label(c, text="Die Aufnahme liegt jetzt in diesem Ordner:", style="WizText.TLabel").pack(anchor="w")
+
         row = ttk.Frame(c)
-        row.pack(fill="x", pady=(6, 16))
-        self.path_var = tk.StringVar(value=str(result.output_dir))   # Referenz halten, sonst leeres Feld
-        ttk.Entry(row, textvariable=self.path_var, state="readonly", font=("", 12)).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Pfad kopieren", style="Wiz.TButton", command=self._copy_path).pack(side="left", padx=8)
-        ttk.Button(row, text="Ordner öffnen", style="Wiz.TButton",
-                   command=lambda: open_in_file_manager(result.output_dir)).pack(side="left")
-        ttk.Label(c, text="So geht es in Sidexis weiter:", style="WizText.TLabel",
-                  font=("", 13, "bold")).pack(anchor="w")
-        ttk.Label(c, style="WizText.TLabel", wraplength=880, justify="left", text=(
-            "1.  Sidexis öffnen und den Patienten auswählen.\n"
-            "2.  Den DICOM-Import aufrufen.\n"
-            "3.  Den oben genannten Ordner auswählen (oder die Datei „DICOMDIR“ darin).\n"
-            "4.  Import bestätigen – fertig.\n\n"
-            "Der USB-Stick kann jetzt herausgezogen werden.")).pack(anchor="w", pady=(6, 0))
-        self._nav(back=self._restart, nxt=self._close, next_text="Schließen")
+        row.pack(fill="x", pady=(0, 12))
+        where = "auf dem Desktop" if on_desktop else "im Ordner"
+        ttk.Label(row, text=f"Gespeichert {where}:", style="WizText.TLabel").pack(side="left")
+        tk.Label(row, text=folder.name, font=("", 14, "bold"), foreground=ACCENT,
+                 background=self.cget("background")).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Ordner zeigen", style="Wiz.TButton",
+                   command=lambda: open_in_file_manager(folder)).pack(side="right")
+        self.path_var = tk.StringVar(value=str(folder))   # für Tests / „Pfad kopieren“
+
+        ttk.Label(c, text="So importieren Sie die Aufnahme in Sidexis 4:", style="WizText.TLabel",
+                  font=("", 13, "bold")).pack(anchor="w", pady=(0, 6))
+        steps = [
+            f"Sidexis 4 öffnen und den Patienten {p.display_name} auswählen.",
+            "Oben in den Bereich „Aufnahme“ wechseln.",
+            "Auf „Import“ klicken.",
+            ("Im Auswahlfenster links auf „Desktop“ (Mac: „Schreibtisch“) klicken, "
+             if on_desktop else "Im Auswahlfenster zum oben genannten Speicherort gehen, ")
+            + f"den Ordner „{folder.name}“ öffnen und die Datei „DICOMDIR“ auswählen, dann „Öffnen“.",
+            "Sidexis zeigt die Aufnahme an: prüfen, dass sie dem richtigen Patienten zugeordnet wird, "
+            "und den Import bestätigen.",
+            "Die Aufnahme erscheint beim Patienten – alles okay, es hat geklappt!",
+        ]
+        steps_frame = ttk.Frame(c)
+        steps_frame.pack(fill="x")
+        steps_frame.columnconfigure(1, weight=1)
+        for i, text in enumerate(steps):
+            last = i == len(steps) - 1
+            tk.Label(steps_frame, text="✓" if last else str(i + 1), width=2, font=("", 12, "bold"),
+                     foreground="white", background="#2b8a3e" if last else ACCENT).grid(
+                row=i, column=0, sticky="nw", pady=3, padx=(0, 12))
+            ttk.Label(steps_frame, text=text, wraplength=780, justify="left",
+                      style="WizOk.TLabel" if last else "WizText.TLabel").grid(row=i, column=1, sticky="w", pady=3)
+        if sys.platform == "darwin":
+            ttk.Label(c, style="WizHint.TLabel", wraplength=880, justify="left",
+                      text="Sidexis läuft nur unter Windows: Den Ordner per USB-Stick oder Netzlaufwerk zum "
+                           "Sidexis-PC bringen und dort auf den Desktop legen.").pack(anchor="w", pady=(8, 0))
+        ttk.Button(c, text="Hat nicht geklappt?", command=self._show_import_help).pack(anchor="w", pady=(10, 0))
+        self._nav(back=self._restart, nxt=self._finish_ok, next_text="✓  Hat geklappt – fertig")
         self.back_btn.config(text="Noch eine Aufnahme")
+
+    def _finish_ok(self):
+        self._close()
+
+    def _show_import_help(self):
+        messagebox.showinfo("Wenn der Import nicht klappt", (
+            "• Sidexis meldet, die Aufnahme sei schon vorhanden:\n"
+            "   Im Import-Fenster die Option zum Import von Duplikaten einschalten und erneut versuchen.\n\n"
+            "• Im Auswahlfenster ist keine Datei „DICOMDIR“ zu sehen:\n"
+            "   Prüfen, ob wirklich der Ordner mit dem Patientennamen geöffnet ist. "
+            "Notfalls statt der Datei den ganzen Ordner auswählen.\n\n"
+            "• Die Aufnahme landet beim falschen Patienten:\n"
+            "   Nicht weiterarbeiten und Felix Bescheid geben.\n\n"
+            "• Sonst: Den Ordner auf dem Desktop liegen lassen, den USB-Stick aufbewahren "
+            "und Felix Bescheid geben – mit dem Wortlaut der Fehlermeldung von Sidexis."), parent=self)
 
     def _copy_path(self):
         self.clipboard_clear()

@@ -71,15 +71,62 @@ def screen_size(widget) -> tuple:
     return widget.winfo_screenwidth(), widget.winfo_screenheight()
 
 
+def desktop_dir() -> Path:
+    """Der Desktop des Benutzers - auch wenn Windows ihn z. B. nach OneDrive umgeleitet hat."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("d1", wintypes.DWORD), ("d2", wintypes.WORD), ("d3", wintypes.WORD),
+                            ("d4", ctypes.c_ubyte * 8)]
+
+            desktop = GUID(0xB4BFCC3A, 0xDB2C, 0x424C, (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+            buf = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(desktop), 0, None, ctypes.byref(buf)) == 0:
+                path = Path(buf.value)
+                ctypes.windll.ole32.CoTaskMemFree(buf)
+                if path.is_dir():
+                    return path
+        except Exception:  # noqa: BLE001
+            pass
+    elif sys.platform.startswith("linux"):
+        try:
+            import subprocess
+
+            out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=3).stdout.strip()
+            if out and Path(out).is_dir() and Path(out) != Path.home():
+                return Path(out)
+        except Exception:  # noqa: BLE001
+            pass
+    for name in ("Desktop", "Schreibtisch"):
+        if (Path.home() / name).is_dir():
+            return Path.home() / name
+    return Path.home()
+
+
 def default_output_base() -> Path:
-    docs = Path.home() / "Documents"
-    return (docs if docs.is_dir() else Path.home()) / "DVT-Sidexis-Import"
+    return desktop_dir()
 
 
 def output_folder_name(patient) -> str:
-    name = "_".join(p for p in (patient.last_name, patient.first_name) if p.strip()) or "Patient"
-    name = re.sub(r"[^\w\-]+", "_", name, flags=re.UNICODE).strip("_") or "Patient"
-    return f"{name}_{dt.datetime.now():%Y%m%d-%H%M%S}"
+    """Ordnername aus dem Patientennamen, z. B. „Müller Hans“ (gültig unter Windows und macOS)."""
+    name = " ".join(p.strip() for p in (patient.last_name, patient.first_name) if p.strip()) or "Patient"
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" .") or "Patient"
+    return name[:80]
+
+
+def unique_output_dir(base: Path, patient) -> Path:
+    """Zielordner mit Patientennamen; existiert er schon, wird „(2)“, „(3)“ … angehängt."""
+    name = output_folder_name(patient)
+    candidate = Path(base) / name
+    number = 2
+    while candidate.exists():
+        candidate = Path(base) / f"{name} ({number})"
+        number += 1
+    return candidate
 
 
 class DvtImporterApp(tk.Tk):
@@ -518,7 +565,7 @@ class DvtImporterApp(tk.Tk):
                     "Bei mindestens einer Aufnahme ist kein Nachname eingetragen.\n"
                     "Sie wird dann unter „Unbekannt“ gespeichert.\n\nTrotzdem fortfahren?"):
                 return
-        out_dir = self.output_base / output_folder_name(selected[0].patient)
+        out_dir = unique_output_dir(self.output_base, selected[0].patient)
         self.last_output = None
         self.open_btn.config(state="disabled")
         self._set_busy("convert")

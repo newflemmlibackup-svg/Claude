@@ -185,3 +185,19 @@ def test_wizard_card_selection_drives_preview(tmp_path, monkeypatch):
     finally:
         wiz.destroy()
         app.destroy()
+
+
+def test_output_folder_named_after_patient(tmp_path):
+    from dvt_importer.gui import output_folder_name, unique_output_dir
+    from dvt_importer.scanner import PatientData
+
+    p = PatientData(last_name="Müller", first_name="Hans")
+    assert output_folder_name(p) == "Müller Hans"
+    assert output_folder_name(PatientData(last_name='Ab/c:"d*', first_name=" ")) == "Ab c d"
+    assert output_folder_name(PatientData()) == "Patient"
+
+    assert unique_output_dir(tmp_path, p) == tmp_path / "Müller Hans"
+    (tmp_path / "Müller Hans").mkdir()
+    assert unique_output_dir(tmp_path, p) == tmp_path / "Müller Hans (2)"
+    (tmp_path / "Müller Hans (2)").mkdir()
+    assert unique_output_dir(tmp_path, p) == tmp_path / "Müller Hans (3)"

@@ -18,10 +18,23 @@ Sidexis-PC gebracht.)
    ergänzt“). Rechts lassen sich Nachname, Vorname, Geburtsdatum, Geschlecht,
    Patienten-Nr., Aufnahmedatum und Bezeichnung ändern – am besten genau so,
    wie der Patient in Sidexis angelegt ist.
-3. **Für Sidexis aufbereiten** klicken. Das Ergebnis landet in
-   `Dokumente/DVT-Sidexis-Import/<Name>_<Datum>` (Speicherort änderbar).
-4. In Sidexis den DICOM-Import aufrufen und diesen Ordner bzw. die darin
-   liegende Datei `DICOMDIR` auswählen.
+3. **Für Sidexis aufbereiten** klicken. Das Ergebnis landet auf dem
+   **Desktop in einem Ordner mit dem Namen des Patienten**, z. B.
+   `Desktop/Müller Hans` (gibt es den schon: `Müller Hans (2)`; Speicherort
+   änderbar).
+4. In Sidexis 4 importieren:
+   1. Patienten auswählen.
+   2. In den Bereich **Aufnahme** wechseln.
+   3. Auf **Import** klicken.
+   4. Auf dem Desktop den Ordner mit dem Patientennamen öffnen, die Datei
+      `DICOMDIR` auswählen und öffnen.
+   5. Prüfen, dass die Aufnahme dem richtigen Patienten zugeordnet wird,
+      und den Import bestätigen.
+   6. Die Aufnahme erscheint beim Patienten – fertig.
+
+   Meldet Sidexis, die Aufnahme sei schon vorhanden, im Import-Fenster den
+   Import von Duplikaten zulassen. Die Bezeichnungen der Menüpunkte können je
+   nach Sidexis-Version leicht abweichen.
 
 Der Original-Datenträger wird nur gelesen und nie verändert.
 
@@ -34,8 +47,9 @@ Seite nur eine einfache Frage, große Schrift, keine Fachbegriffe.
 1. Wo ist die fremde Aufnahme? (Stick anklicken oder Ordner wählen)
 2. Aufnahme ansehen – mit Vorschau und Klartext-Hinweis, falls Schichten fehlen
 3. Für welchen Patienten? (Nachname, Vorname, Geburtsdatum)
-4. Wo speichern? (der übliche Ordner ist vorausgewählt)
-5. Kontrolle, Fertigstellen und Anleitung für den Import in Sidexis
+4. Wo speichern? (vorausgewählt: Desktop, Ordner mit dem Patientennamen)
+5. Kontrolle, Fertigstellen und Schritt-für-Schritt-Anleitung für den Import
+   in Sidexis 4 – mit „Hat geklappt“ bzw. Hilfe, falls nicht
 
 ### Vorschau
 
